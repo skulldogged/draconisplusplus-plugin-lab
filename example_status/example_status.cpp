@@ -18,7 +18,7 @@ using namespace draconis::utils::types;
 
 namespace {
   // Keep collected data in a small struct. Bigger plugins usually fill this
-  // from collectData(), cache it, and expose it through getFields().
+  // from collectData(), cache it, and expose typed values through getFields().
   struct ExampleStatusData {
     String message;
   };
@@ -85,8 +85,8 @@ namespace {
       return {};
     }
 
-    [[nodiscard]] auto getFields() const -> Map<String, String> override {
-      // Fields are flattened by Draconis++ for compact/template output.
+    [[nodiscard]] auto getFields() const -> PluginFields override {
+      // These typed fields are used directly by structured format plugins.
       return {
         { "message", m_data.message },
       };

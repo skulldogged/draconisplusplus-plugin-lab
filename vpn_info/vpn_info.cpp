@@ -113,34 +113,20 @@ namespace {
     };
   }
 
-  auto JoinInterfaceNames(const Vec<VpnInterface>& interfaces) -> String {
-    String result;
-    usize  size = 0;
+  auto InterfaceNames(const Vec<VpnInterface>& interfaces) -> Vec<String> {
+    Vec<String> names;
+    names.reserve(interfaces.size());
     for (const VpnInterface& iface : interfaces)
-      size += iface.name.size() + 2;
-    result.reserve(size);
-
-    for (usize i = 0; i < interfaces.size(); ++i) {
-      if (i > 0)
-        result += ", ";
-      result += interfaces[i].name;
-    }
-    return result;
+      names.push_back(iface.name);
+    return names;
   }
 
-  auto JoinInterfaceDisplayNames(const Vec<VpnInterface>& interfaces) -> String {
-    String result;
-    usize  size = 0;
+  auto InterfaceDisplayNames(const Vec<VpnInterface>& interfaces) -> Vec<String> {
+    Vec<String> names;
+    names.reserve(interfaces.size());
     for (const VpnInterface& iface : interfaces)
-      size += iface.displayName.size() + 2;
-    result.reserve(size);
-
-    for (usize i = 0; i < interfaces.size(); ++i) {
-      if (i > 0)
-        result += ", ";
-      result += interfaces[i].displayName;
-    }
-    return result;
+      names.push_back(iface.displayName);
+    return names;
   }
 
   auto ClassifyVpnInterface(StringView name, StringView description = {}) -> Option<VpnClassification> {
@@ -357,15 +343,15 @@ namespace {
       return {};
     }
 
-    [[nodiscard]] auto getFields() const -> Map<String, String> override {
+    [[nodiscard]] auto getFields() const -> PluginFields override {
       return {
-        { "active", m_data.active ? "true" : "false" },
-        { "count", std::to_string(m_data.interfaces.size()) },
+        { "active", m_data.active },
+        { "count", static_cast<u64>(m_data.interfaces.size()) },
         { "primary", m_data.interfaces.empty() ? String {} : m_data.interfaces.front().name },
         { "primary_kind", m_data.interfaces.empty() ? String {} : m_data.interfaces.front().kind },
         { "primary_display", m_data.interfaces.empty() ? String {} : m_data.interfaces.front().displayName },
-        { "interfaces", JoinInterfaceNames(m_data.interfaces) },
-        { "display_names", JoinInterfaceDisplayNames(m_data.interfaces) },
+        { "interfaces", InterfaceNames(m_data.interfaces) },
+        { "display_names", InterfaceDisplayNames(m_data.interfaces) },
       };
     }
 

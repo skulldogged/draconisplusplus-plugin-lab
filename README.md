@@ -112,10 +112,13 @@ NetBSD, and DragonFly BSD.
 
 It reports these fields:
 
-- `active`: `true` or `false`
+- `active`: boolean connection state
 - `count`: number of detected VPN-like interfaces
 - `primary`: first detected interface
-- `interfaces`: comma-separated interface names
+- `primary_kind`: detected VPN family for the primary interface
+- `primary_display`: display label for the primary interface
+- `interfaces`: array of interface names
+- `display_names`: array of display labels
 
 Example layout row:
 
