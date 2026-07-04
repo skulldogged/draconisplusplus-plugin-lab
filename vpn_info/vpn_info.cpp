@@ -113,22 +113,6 @@ namespace {
     };
   }
 
-  auto InterfaceNames(const Vec<VpnInterface>& interfaces) -> Vec<String> {
-    Vec<String> names;
-    names.reserve(interfaces.size());
-    for (const VpnInterface& iface : interfaces)
-      names.push_back(iface.name);
-    return names;
-  }
-
-  auto InterfaceDisplayNames(const Vec<VpnInterface>& interfaces) -> Vec<String> {
-    Vec<String> names;
-    names.reserve(interfaces.size());
-    for (const VpnInterface& iface : interfaces)
-      names.push_back(iface.displayName);
-    return names;
-  }
-
   auto ClassifyVpnInterface(StringView name, StringView description = {}) -> Option<VpnClassification> {
     const String lowerName        = ToLower(name);
     const String lowerDescription = ToLower(description);
@@ -344,14 +328,23 @@ namespace {
     }
 
     [[nodiscard]] auto getFields() const -> PluginFields override {
+      PluginFieldObject interfaces;
+      for (usize i = 0; i < m_data.interfaces.size(); ++i) {
+        const VpnInterface& iface = m_data.interfaces[i];
+        interfaces.emplace(
+          iface.name,
+          PluginFieldObject {
+            { "active", true },
+            { "display_name", iface.displayName },
+            { "kind", iface.kind },
+            { "primary", i == 0 },
+          }
+        );
+      }
+
       return {
         { "active", m_data.active },
-        { "count", static_cast<u64>(m_data.interfaces.size()) },
-        { "primary", m_data.interfaces.empty() ? String {} : m_data.interfaces.front().name },
-        { "primary_kind", m_data.interfaces.empty() ? String {} : m_data.interfaces.front().kind },
-        { "primary_display", m_data.interfaces.empty() ? String {} : m_data.interfaces.front().displayName },
-        { "interfaces", InterfaceNames(m_data.interfaces) },
-        { "display_names", InterfaceDisplayNames(m_data.interfaces) },
+        { "interfaces", std::move(interfaces) },
       };
     }
 
