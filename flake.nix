@@ -1,5 +1,5 @@
 {
-  description = "Template for external Draconis++ plugins";
+  description = "Personal external plugins for Draconis++";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -16,6 +16,7 @@
     # Each name should be a direct child directory with a plugin.json manifest.
     pluginNames = [
       "example_status"
+      "vpn_info"
     ];
   in
     {
@@ -58,7 +59,7 @@
           exampleStatus ? null,
         }:
           pkgs.stdenvNoCC.mkDerivation {
-            pname = "draconisplusplus-plugin-template";
+            pname = "draconisplusplus-plugin-lab";
             version = "0.1.0";
             src = self;
 

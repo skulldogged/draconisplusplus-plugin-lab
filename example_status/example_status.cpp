@@ -3,8 +3,6 @@
  * @brief Example Draconis++ info provider plugin.
  */
 
-#include <format>
-
 #include <Drac++/Core/Plugin.hpp>
 
 #include <Drac++/Utils/Types.hpp>
@@ -20,7 +18,7 @@ using namespace draconis::utils::types;
 
 namespace {
   // Keep collected data in a small struct. Bigger plugins usually fill this
-  // from collectData(), cache it, and serialize it in toJson()/getFields().
+  // from collectData(), cache it, and expose it through getFields().
   struct ExampleStatusData {
     String message;
   };
@@ -85,10 +83,6 @@ namespace {
       // Gather fresh data here. Use cache.get<T>() / cache.set<T>() for
       // expensive work such as network calls, subprocesses, or filesystem scans.
       return {};
-    }
-
-    [[nodiscard]] auto toJson() const -> Result<String> override {
-      return std::format(R"({{"message":"{}"}})", m_data.message);
     }
 
     [[nodiscard]] auto getFields() const -> Map<String, String> override {

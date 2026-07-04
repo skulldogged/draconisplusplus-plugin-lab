@@ -1,8 +1,9 @@
-# Draconis++ Plugin Template
+# Draconis++ Plugin Lab
 
-A starter repository for external Draconis++ plugins.
+A personal repository for external Draconis++ plugins that do not belong in core.
 
-This template demonstrates:
+This repo keeps plugin development separate from Draconis++ core while still
+building cleanly through the core plugin system. It includes:
 
 - a self-contained plugin directory with `plugin.json`
 - a simple `IInfoProviderPlugin`
@@ -15,6 +16,9 @@ This template demonstrates:
 example_status/
   example_status.cpp
   plugin.json
+vpn_info/
+  vpn_info.cpp
+  plugin.json
 flake.nix
 ```
 
@@ -26,14 +30,14 @@ a `plugin.json` manifest. This repository root is therefore a plugin root.
 From a Draconis++ core checkout:
 
 ```bash
-meson setup build -Dplugin_dirs=/path/to/draconisplusplus-plugin-template
+meson setup build -Dplugin_dirs=/path/to/draconisplusplus-plugin-lab
 meson compile -C build
 ```
 
 To compile the plugin statically into Draconis++:
 
 ```bash
-meson setup build -Dplugin_dirs=/path/to/draconisplusplus-plugin-template -Dstatic_plugins=example_status
+meson setup build -Dplugin_dirs=/path/to/draconisplusplus-plugin-lab -Dstatic_plugins=vpn_info
 meson compile -C build
 ```
 
@@ -44,6 +48,7 @@ The flake exposes plugin-root packages:
 - `packages.${system}.default`
 - `packages.${system}.all`
 - `packages.${system}.example_status`
+- `packages.${system}.vpn_info`
 
 For precompiled plugin config, use `lib.${system}.mkPluginRoot` to generate a
 configured copy of this plugin root. The generated header is written to
@@ -73,7 +78,7 @@ programs.draconisplusplus = {
   pluginPackages = [
     inputs.my-draconis-plugin.packages.${pkgs.system}.all
   ];
-  staticPlugins = ["example_status"];
+  staticPlugins = ["vpn_info"];
 };
 ```
 
@@ -97,3 +102,30 @@ Manifest notes:
 
 Keep plugin-specific Nix config in this repository. The core Draconis++ module
 should only receive plugin roots through `pluginPackages` or `pluginDirs`.
+
+## Included Plugins
+
+### `vpn_info`
+
+Detects active VPN-like interfaces on Windows, macOS, Linux, FreeBSD, OpenBSD,
+NetBSD, and DragonFly BSD.
+
+It reports these fields:
+
+- `active`: `true` or `false`
+- `count`: number of detected VPN-like interfaces
+- `primary`: first detected interface
+- `interfaces`: comma-separated interface names
+
+Example layout row:
+
+```nix
+programs.draconisplusplus.layout = [
+  {
+    name = "network";
+    rows = [
+      { key = "plugin.vpn_info"; }
+    ];
+  }
+];
+```
