@@ -1,0 +1,7 @@
+{
+  "name": "example_status",
+  "class": "ExampleStatusPlugin",
+  "description": "Example Draconis++ info provider plugin",
+  "platforms": ["all"],
+  "deps": []
+}
