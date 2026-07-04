@@ -9,8 +9,10 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <initializer_list>
+#include <span>
 #include <string_view>
+
+#include <matchit.hpp>
 
 #include <Drac++/Core/Plugin.hpp>
 
@@ -38,6 +40,12 @@ namespace {
   struct VpnInterface {
     String name;
     String kind;
+    String displayName;
+  };
+
+  struct VpnClassification {
+    String kind;
+    String displayName;
   };
 
   struct VpnInfoData {
@@ -53,17 +61,56 @@ namespace {
     return lowered;
   }
 
-  template <usize N>
-  auto ContainsAny(StringView haystack, const std::array<StringView, N>& needles) -> bool {
+  struct VpnRule {
+    StringView              kind;
+    std::span<const StringView> needles;
+    std::span<const StringView> prefixes;
+  };
+
+  auto ContainsAny(StringView haystack, std::span<const StringView> needles) -> bool {
     return std::ranges::any_of(needles, [haystack](StringView needle) {
       return haystack.find(needle) != StringView::npos;
     });
   }
 
-  auto StartsWithAny(StringView haystack, const std::initializer_list<StringView>& prefixes) -> bool {
+  auto StartsWithAny(StringView haystack, std::span<const StringView> prefixes) -> bool {
     return std::ranges::any_of(prefixes, [haystack](StringView prefix) {
       return haystack.starts_with(prefix);
     });
+  }
+
+  auto DisplayNameForKind(StringView kind) -> StringView {
+    using matchit::match, matchit::is, matchit::_;
+
+    return match(kind)(
+      is | "tailscale"     = StringView { "Tailscale" },
+      is | "zerotier"      = StringView { "ZeroTier" },
+      is | "mullvad"       = StringView { "Mullvad" },
+      is | "proton"        = StringView { "Proton VPN" },
+      is | "nordvpn"       = StringView { "NordVPN" },
+      is | "expressvpn"    = StringView { "ExpressVPN" },
+      is | "surfshark"     = StringView { "Surfshark" },
+      is | "pia"           = StringView { "Private Internet Access" },
+      is | "viscosity"     = StringView { "Viscosity" },
+      is | "anyconnect"    = StringView { "Cisco AnyConnect" },
+      is | "globalprotect" = StringView { "GlobalProtect" },
+      is | "fortinet"      = StringView { "Fortinet VPN" },
+      is | "pulse"         = StringView { "Pulse Secure" },
+      is | "wireguard"     = StringView { "WireGuard" },
+      is | "tun/tap"       = StringView { "OpenVPN" },
+      is | "utun"          = StringView { "VPN Tunnel" },
+      is | "tunnel"        = StringView { "VPN Tunnel" },
+      is | "ppp"           = StringView { "PPP" },
+      is | "ipsec"         = StringView { "IPsec" },
+      is | _               = kind
+    );
+  }
+
+  auto MakeClassification(StringView kind) -> VpnClassification {
+    return {
+      .kind        = String { kind },
+      .displayName = String { DisplayNameForKind(kind) },
+    };
   }
 
   auto JoinInterfaceNames(const Vec<VpnInterface>& interfaces) -> String {
@@ -81,28 +128,22 @@ namespace {
     return result;
   }
 
-  auto GetDisplayName(const VpnInterface& iface) -> String {
-    if (iface.kind == "tailscale")
-      return "Tailscale";
-    if (iface.kind == "wireguard")
-      return "WireGuard";
-    if (iface.kind == "zerotier")
-      return "ZeroTier";
-    if (iface.kind == "ipsec")
-      return "IPsec";
-    if (iface.kind == "ppp")
-      return "PPP";
-    if (iface.kind == "enterprise")
-      return "Enterprise VPN";
-    if (iface.kind == "client")
-      return "VPN Client";
-    if (iface.kind == "tunnel")
-      return "VPN Tunnel";
+  auto JoinInterfaceDisplayNames(const Vec<VpnInterface>& interfaces) -> String {
+    String result;
+    usize  size = 0;
+    for (const VpnInterface& iface : interfaces)
+      size += iface.displayName.size() + 2;
+    result.reserve(size);
 
-    return iface.name;
+    for (usize i = 0; i < interfaces.size(); ++i) {
+      if (i > 0)
+        result += ", ";
+      result += interfaces[i].displayName;
+    }
+    return result;
   }
 
-  auto ClassifyVpnInterface(StringView name, StringView description = {}) -> Option<String> {
+  auto ClassifyVpnInterface(StringView name, StringView description = {}) -> Option<VpnClassification> {
     const String lowerName        = ToLower(name);
     const String lowerDescription = ToLower(description);
     String       combined;
@@ -111,24 +152,55 @@ namespace {
     combined += ' ';
     combined += lowerDescription;
 
-    if (ContainsAny(combined, std::array<StringView, 1> { "wireguard" }) || StartsWithAny(lowerName, { "wg" }))
-      return String { "wireguard" };
-    if (ContainsAny(combined, std::array<StringView, 1> { "tailscale" }))
-      return String { "tailscale" };
-    if (ContainsAny(combined, std::array<StringView, 1> { "zerotier" }) || StartsWithAny(lowerName, { "zt" }))
-      return String { "zerotier" };
-    if (ContainsAny(combined, std::array<StringView, 3> { "openvpn", "tun", "tap" }) || StartsWithAny(lowerName, { "tun", "tap" }))
-      return String { "tun/tap" };
-    if (ContainsAny(combined, std::array<StringView, 1> { "utun" }) || StartsWithAny(lowerName, { "utun" }))
-      return String { "utun" };
-    if (ContainsAny(combined, std::array<StringView, 3> { "ppp", "pptp", "l2tp" }) || StartsWithAny(lowerName, { "ppp" }))
-      return String { "ppp" };
-    if (ContainsAny(combined, std::array<StringView, 3> { "ipsec", "strongswan", "ikev2" }))
-      return String { "ipsec" };
-    if (ContainsAny(combined, std::array<StringView, 6> { "anyconnect", "globalprotect", "fortinet", "forticlient", "pulse", "palo alto" }))
-      return String { "enterprise" };
-    if (ContainsAny(combined, std::array<StringView, 8> { "mullvad", "proton", "nordvpn", "expressvpn", "surfshark", "pia", "private internet access", "viscosity" }))
-      return String { "client" };
+    static constexpr std::array<StringView, 0> noPrefixes {};
+    static constexpr std::array<StringView, 1> tailscaleNeedles { "tailscale" };
+    static constexpr std::array<StringView, 1> zerotierNeedles { "zerotier" };
+    static constexpr std::array<StringView, 1> zerotierPrefixes { "zt" };
+    static constexpr std::array<StringView, 1> mullvadNeedles { "mullvad" };
+    static constexpr std::array<StringView, 2> protonNeedles { "protonvpn", "proton vpn" };
+    static constexpr std::array<StringView, 2> nordvpnNeedles { "nordvpn", "nordlynx" };
+    static constexpr std::array<StringView, 1> expressvpnNeedles { "expressvpn" };
+    static constexpr std::array<StringView, 1> surfsharkNeedles { "surfshark" };
+    static constexpr std::array<StringView, 2> piaNeedles { "pia", "private internet access" };
+    static constexpr std::array<StringView, 1> viscosityNeedles { "viscosity" };
+    static constexpr std::array<StringView, 1> anyconnectNeedles { "anyconnect" };
+    static constexpr std::array<StringView, 2> globalprotectNeedles { "globalprotect", "palo alto" };
+    static constexpr std::array<StringView, 2> fortinetNeedles { "fortinet", "forticlient" };
+    static constexpr std::array<StringView, 1> pulseNeedles { "pulse" };
+    static constexpr std::array<StringView, 1> wireguardNeedles { "wireguard" };
+    static constexpr std::array<StringView, 1> wireguardPrefixes { "wg" };
+    static constexpr std::array<StringView, 3> openvpnNeedles { "openvpn", "tun", "tap" };
+    static constexpr std::array<StringView, 2> openvpnPrefixes { "tun", "tap" };
+    static constexpr std::array<StringView, 1> utunNeedles { "utun" };
+    static constexpr std::array<StringView, 1> utunPrefixes { "utun" };
+    static constexpr std::array<StringView, 3> pppNeedles { "ppp", "pptp", "l2tp" };
+    static constexpr std::array<StringView, 1> pppPrefixes { "ppp" };
+    static constexpr std::array<StringView, 3> ipsecNeedles { "ipsec", "strongswan", "ikev2" };
+
+    static constexpr std::array<VpnRule, 18> rules {
+      VpnRule { .kind = "tailscale", .needles = tailscaleNeedles, .prefixes = noPrefixes },
+      VpnRule { .kind = "zerotier", .needles = zerotierNeedles, .prefixes = zerotierPrefixes },
+      VpnRule { .kind = "mullvad", .needles = mullvadNeedles, .prefixes = noPrefixes },
+      VpnRule { .kind = "proton", .needles = protonNeedles, .prefixes = noPrefixes },
+      VpnRule { .kind = "nordvpn", .needles = nordvpnNeedles, .prefixes = noPrefixes },
+      VpnRule { .kind = "expressvpn", .needles = expressvpnNeedles, .prefixes = noPrefixes },
+      VpnRule { .kind = "surfshark", .needles = surfsharkNeedles, .prefixes = noPrefixes },
+      VpnRule { .kind = "pia", .needles = piaNeedles, .prefixes = noPrefixes },
+      VpnRule { .kind = "viscosity", .needles = viscosityNeedles, .prefixes = noPrefixes },
+      VpnRule { .kind = "anyconnect", .needles = anyconnectNeedles, .prefixes = noPrefixes },
+      VpnRule { .kind = "globalprotect", .needles = globalprotectNeedles, .prefixes = noPrefixes },
+      VpnRule { .kind = "fortinet", .needles = fortinetNeedles, .prefixes = noPrefixes },
+      VpnRule { .kind = "pulse", .needles = pulseNeedles, .prefixes = noPrefixes },
+      VpnRule { .kind = "wireguard", .needles = wireguardNeedles, .prefixes = wireguardPrefixes },
+      VpnRule { .kind = "tun/tap", .needles = openvpnNeedles, .prefixes = openvpnPrefixes },
+      VpnRule { .kind = "utun", .needles = utunNeedles, .prefixes = utunPrefixes },
+      VpnRule { .kind = "ppp", .needles = pppNeedles, .prefixes = pppPrefixes },
+      VpnRule { .kind = "ipsec", .needles = ipsecNeedles, .prefixes = noPrefixes },
+    };
+
+    for (const VpnRule& rule : rules)
+      if (ContainsAny(combined, rule.needles) || StartsWithAny(lowerName, rule.prefixes))
+        return MakeClassification(rule.kind);
 
     return None;
   }
@@ -185,16 +257,20 @@ namespace {
       const String name = adapter->AdapterName != nullptr ? String(adapter->AdapterName) : String {};
       const String description = WideToUtf8(adapter->Description);
 
-      Option<String> kind = None;
+      Option<VpnClassification> classification = None;
       if (adapter->IfType == IF_TYPE_TUNNEL)
-        kind = String { "tunnel" };
+        classification = MakeClassification("tunnel");
       else if (adapter->IfType == IF_TYPE_PPP)
-        kind = String { "ppp" };
+        classification = MakeClassification("ppp");
       else
-        kind = ClassifyVpnInterface(name, description);
+        classification = ClassifyVpnInterface(name, description);
 
-      if (kind)
-        interfaces.push_back({ .name = !description.empty() ? description : name, .kind = *kind });
+      if (classification)
+        interfaces.push_back({
+          .name        = !description.empty() ? description : name,
+          .kind        = classification->kind,
+          .displayName = classification->displayName,
+        });
     }
 
     FreeLibrary(ipHelper);
@@ -220,8 +296,12 @@ namespace {
       if (std::ranges::any_of(interfaces, [&name](const VpnInterface& iface) { return iface.name == name; }))
         continue;
 
-      if (auto kind = ClassifyVpnInterface(name))
-        interfaces.push_back({ .name = name, .kind = *kind });
+      if (auto classification = ClassifyVpnInterface(name))
+        interfaces.push_back({
+          .name        = name,
+          .kind        = classification->kind,
+          .displayName = classification->displayName,
+        });
     }
 
     freeifaddrs(addrs);
@@ -282,7 +362,10 @@ namespace {
         { "active", m_data.active ? "true" : "false" },
         { "count", std::to_string(m_data.interfaces.size()) },
         { "primary", m_data.interfaces.empty() ? String {} : m_data.interfaces.front().name },
+        { "primary_kind", m_data.interfaces.empty() ? String {} : m_data.interfaces.front().kind },
+        { "primary_display", m_data.interfaces.empty() ? String {} : m_data.interfaces.front().displayName },
         { "interfaces", JoinInterfaceNames(m_data.interfaces) },
+        { "display_names", JoinInterfaceDisplayNames(m_data.interfaces) },
       };
     }
 
@@ -290,7 +373,7 @@ namespace {
       if (!m_data.active)
         ERR(NotFound, "No active VPN interface found");
 
-      return GetDisplayName(m_data.interfaces.front());
+      return m_data.interfaces.front().displayName;
     }
 
     [[nodiscard]] auto getDisplayIcon() const -> String override {
