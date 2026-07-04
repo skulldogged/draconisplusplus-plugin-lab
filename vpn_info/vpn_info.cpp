@@ -334,7 +334,6 @@ namespace {
         interfaces.emplace(
           iface.name,
           PluginFieldObject {
-            { "active", true },
             { "display_name", iface.displayName },
             { "kind", iface.kind },
             { "primary", i == 0 },

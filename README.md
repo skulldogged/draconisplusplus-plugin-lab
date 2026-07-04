@@ -114,7 +114,7 @@ It reports these fields:
 
 - `active`: boolean connection state
 - `interfaces`: object keyed by interface ID. Each value contains `display_name`,
-  `kind`, `active`, and `primary`.
+  `kind`, and `primary`.
 
 Example layout row:
 
