@@ -1,7 +1,7 @@
 {
   "name": "vpn_info",
   "class": "VpnInfoPlugin",
-  "description": "Detects active VPN-like network interfaces",
+  "description": "Detects VPN-like network interfaces",
   "platforms": ["windows", "darwin", "linux", "freebsd", "openbsd", "netbsd", "dragonfly"],
   "deps": []
 }

@@ -107,14 +107,14 @@ should only receive plugin roots through `pluginPackages` or `pluginDirs`.
 
 ### `vpn_info`
 
-Detects active VPN-like interfaces on Windows, macOS, Linux, FreeBSD, OpenBSD,
+Detects VPN-like interfaces on Windows, macOS, Linux, FreeBSD, OpenBSD,
 NetBSD, and DragonFly BSD.
 
 It reports these fields:
 
-- `active`: boolean connection state
+- `active`: true when any detected VPN-like interface is up
 - `interfaces`: object keyed by interface ID. Each value contains `display_name`,
-  `kind`, and `primary`.
+  `kind`, `active`, and `primary`.
 
 Example layout row:
 

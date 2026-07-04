@@ -30,6 +30,10 @@ using enum DracErrorCode;
   #endif
   #include <iphlpapi.h>
   #include <windows.h>
+#elif defined(__linux__)
+  #include <filesystem>
+  #include <fstream>
+  #include <net/if.h>
 #else
   #include <ifaddrs.h>
   #include <net/if.h>
@@ -41,6 +45,7 @@ namespace {
     String name;
     String kind;
     String displayName;
+    bool   active = false;
   };
 
   struct VpnClassification {
@@ -221,11 +226,9 @@ namespace {
     }
 
     for (IP_ADAPTER_ADDRESSES* adapter = addresses; adapter != nullptr; adapter = adapter->Next) {
-      if (adapter->OperStatus != IfOperStatusUp)
-        continue;
-
       const String name = adapter->AdapterName != nullptr ? String(adapter->AdapterName) : String {};
       const String description = WideToUtf8(adapter->Description);
+      const bool   active = adapter->OperStatus == IfOperStatusUp;
 
       Option<VpnClassification> classification = None;
       if (adapter->IfType == IF_TYPE_TUNNEL)
@@ -240,10 +243,58 @@ namespace {
           .name        = !description.empty() ? description : name,
           .kind        = classification->kind,
           .displayName = classification->displayName,
+          .active      = active,
         });
     }
 
     FreeLibrary(ipHelper);
+    return interfaces;
+  }
+#elif defined(__linux__)
+  auto ReadInterfaceFlags(const std::filesystem::path& interfacePath) -> unsigned int {
+    std::ifstream input(interfacePath / "flags");
+    if (!input)
+      return 0;
+
+    String value;
+    input >> value;
+
+    try {
+      return static_cast<unsigned int>(std::stoul(value, nullptr, 0));
+    } catch (...) {
+      return 0;
+    }
+  }
+
+  auto CollectVpnInterfaces() -> Vec<VpnInterface> {
+    Vec<VpnInterface> interfaces;
+    const std::filesystem::path netDir { "/sys/class/net" };
+
+    std::error_code errc;
+    if (!std::filesystem::exists(netDir, errc))
+      return interfaces;
+
+    for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(netDir, errc)) {
+      if (errc)
+        break;
+
+      const String name = entry.path().filename().string();
+      if (name.empty())
+        continue;
+
+      const unsigned int flags = ReadInterfaceFlags(entry.path());
+      if ((flags & IFF_LOOPBACK) != 0)
+        continue;
+
+      if (auto classification = ClassifyVpnInterface(name))
+        interfaces.push_back({
+          .name        = name,
+          .kind        = classification->kind,
+          .displayName = classification->displayName,
+          .active      = (flags & IFF_UP) != 0,
+        });
+    }
+
     return interfaces;
   }
 #else
@@ -259,7 +310,7 @@ namespace {
         continue;
 
       const unsigned int flags = iter->ifa_flags;
-      if ((flags & IFF_UP) == 0 || (flags & IFF_LOOPBACK) != 0)
+      if ((flags & IFF_LOOPBACK) != 0)
         continue;
 
       const String name(iter->ifa_name);
@@ -271,6 +322,7 @@ namespace {
           .name        = name,
           .kind        = classification->kind,
           .displayName = classification->displayName,
+          .active      = (flags & IFF_UP) != 0,
         });
     }
 
@@ -286,7 +338,7 @@ namespace {
         .name         = "VPN Info",
         .version      = "0.1.0",
         .author       = "Mars",
-        .description  = "Detects active VPN-like network interfaces",
+        .description  = "Detects VPN-like network interfaces",
         .type         = PluginType::InfoProvider,
         .dependencies = { .requiresNetwork = true },
       };
@@ -322,21 +374,23 @@ namespace {
     auto collectData(PluginCache& cache) -> Result<Unit> override {
       (void)cache;
       m_data.interfaces = CollectVpnInterfaces();
-      m_data.active     = !m_data.interfaces.empty();
+      m_data.active     = std::ranges::any_of(m_data.interfaces, [](const VpnInterface& iface) { return iface.active; });
       m_lastError       = None;
       return {};
     }
 
     [[nodiscard]] auto getFields() const -> PluginFields override {
+      const auto primary = std::ranges::find_if(m_data.interfaces, [](const VpnInterface& iface) { return iface.active; });
+
       PluginFieldObject interfaces;
-      for (usize i = 0; i < m_data.interfaces.size(); ++i) {
-        const VpnInterface& iface = m_data.interfaces[i];
+      for (const VpnInterface& iface : m_data.interfaces) {
         interfaces.emplace(
           iface.name,
           PluginFieldObject {
+            { "active", iface.active },
             { "display_name", iface.displayName },
             { "kind", iface.kind },
-            { "primary", i == 0 },
+            { "primary", primary != m_data.interfaces.end() && iface.name == primary->name },
           }
         );
       }
@@ -351,7 +405,11 @@ namespace {
       if (!m_data.active)
         ERR(NotFound, "No active VPN interface found");
 
-      return m_data.interfaces.front().displayName;
+      auto primary = std::ranges::find_if(m_data.interfaces, [](const VpnInterface& iface) { return iface.active; });
+      if (primary == m_data.interfaces.end())
+        ERR(NotFound, "No active VPN interface found");
+
+      return primary->displayName;
     }
 
     [[nodiscard]] auto getDisplayIcon() const -> String override {
