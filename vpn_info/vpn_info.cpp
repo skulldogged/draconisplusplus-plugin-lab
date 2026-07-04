@@ -81,6 +81,27 @@ namespace {
     return result;
   }
 
+  auto GetDisplayName(const VpnInterface& iface) -> String {
+    if (iface.kind == "tailscale")
+      return "Tailscale";
+    if (iface.kind == "wireguard")
+      return "WireGuard";
+    if (iface.kind == "zerotier")
+      return "ZeroTier";
+    if (iface.kind == "ipsec")
+      return "IPsec";
+    if (iface.kind == "ppp")
+      return "PPP";
+    if (iface.kind == "enterprise")
+      return "Enterprise VPN";
+    if (iface.kind == "client")
+      return "VPN Client";
+    if (iface.kind == "tunnel")
+      return "VPN Tunnel";
+
+    return iface.name;
+  }
+
   auto ClassifyVpnInterface(StringView name, StringView description = {}) -> Option<String> {
     const String lowerName        = ToLower(name);
     const String lowerDescription = ToLower(description);
@@ -269,11 +290,11 @@ namespace {
       if (!m_data.active)
         ERR(NotFound, "No active VPN interface found");
 
-      return m_data.interfaces.front().name;
+      return GetDisplayName(m_data.interfaces.front());
     }
 
     [[nodiscard]] auto getDisplayIcon() const -> String override {
-      return " 󰌾  ";
+      return " 󰖂  ";
     }
 
     [[nodiscard]] auto getDisplayLabel() const -> String override {
