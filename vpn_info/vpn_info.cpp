@@ -14,10 +14,13 @@
 
 #include <Drac++/Core/Plugin.hpp>
 
+#include <Drac++/Utils/Error.hpp>
 #include <Drac++/Utils/Types.hpp>
 
 using namespace draconis::core::plugin;
+using namespace draconis::utils::error;
 using namespace draconis::utils::types;
+using enum DracErrorCode;
 
 #ifdef _WIN32
   #ifndef WIN32_LEAN_AND_MEAN
@@ -264,20 +267,13 @@ namespace {
 
     [[nodiscard]] auto getDisplayValue() const -> Result<String> override {
       if (!m_data.active)
-        return String { "Not connected" };
+        ERR(NotFound, "No active VPN interface found");
 
-      String output = "Connected: ";
-      output += m_data.interfaces.front().name;
-      if (m_data.interfaces.size() > 1) {
-        output += " (+";
-        output += std::to_string(m_data.interfaces.size() - 1);
-        output += ')';
-      }
-      return output;
+      return m_data.interfaces.front().name;
     }
 
     [[nodiscard]] auto getDisplayIcon() const -> String override {
-      return "  ";
+      return " 󰌾  ";
     }
 
     [[nodiscard]] auto getDisplayLabel() const -> String override {
