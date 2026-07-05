@@ -44,6 +44,13 @@ using enum DracErrorCode;
   #include <windows.h>
 #endif
 
+#if DRAC_PRECOMPILED_CONFIG && __has_include("config.hpp")
+  #include "config.hpp"
+  #define CONTAINER_INFO_HAS_PRECOMPILED_CONFIG 1
+#else
+  #define CONTAINER_INFO_HAS_PRECOMPILED_CONFIG 0
+#endif
+
 namespace container_info::dto {
   struct DockerContainer {
     String State;
@@ -192,6 +199,17 @@ namespace {
       ERR_FMT(ParseError, "Failed to parse container_info config: {}", glz::format_error(readError, buffer));
 
     return ParseConfig(tomlCfg);
+  }
+
+  auto LoadConfigFromPrecompiled() -> ContainerInfoConfig {
+#if CONTAINER_INFO_HAS_PRECOMPILED_CONFIG
+    dto::TomlConfig tomlCfg;
+    for (const char* backend : draconis::config::CONTAINER_INFO_BACKENDS)
+      tomlCfg.backends.emplace_back(backend);
+    return ParseConfig(tomlCfg);
+#else
+    return ContainerInfoConfig {};
+#endif
   }
 
   auto LoadConfigFromFilesystem(const fs::path& configDir) -> Result<ContainerInfoConfig> {
@@ -962,10 +980,15 @@ namespace {
     auto initialize(const PluginContext& ctx, PluginCache& cache) -> Result<Unit> override {
       (void)cache;
 
+#if DRAC_PRECOMPILED_CONFIG
+      (void)ctx;
+      m_config = LoadConfigFromPrecompiled();
+#else
       if (m_runtimeConfig)
         m_config = TRY(LoadConfigFromToml(*m_runtimeConfig, "container_info runtime config"));
       else
         m_config = TRY(LoadConfigFromFilesystem(ctx.configDir));
+#endif
 
       if (m_config.backends.empty())
         ERR(ConfigurationError, "container_info has no enabled backends");

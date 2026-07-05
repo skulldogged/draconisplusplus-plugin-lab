@@ -106,7 +106,16 @@ It reports these fields:
 Display output uses the first available runtime in priority order:
 Docker, Podman, containerd, CRI, then LXD.
 
-Configure which backends are checked with
+For precompiled/static builds, configure which backends are checked through
+the plugin root:
+
+```nix
+inputs.my-draconis-plugin.lib.${pkgs.system}.mkPluginRoot {
+  containerInfo.backends = ["podman"];
+}
+```
+
+For runtime plugin builds, use
 `~/.config/draconis++/plugins/container_info.toml`:
 
 ```toml

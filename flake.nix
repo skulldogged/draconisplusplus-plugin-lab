@@ -36,10 +36,34 @@
           protobuf
         ];
 
+        escapeCppString =
+          value:
+            builtins.replaceStrings
+            ["\\" "\""]
+            ["\\\\" "\\\""]
+            (toString value);
+
+        containerInfoConfigHeader = containerInfo: let
+          backends = containerInfo.backends or ["all"];
+          backendCount = builtins.length backends;
+          backendValues = builtins.concatStringsSep ", " (map (backend: "\"${escapeCppString backend}\"") backends);
+        in ''
+          #pragma once
+
+          #include <array>
+
+          namespace draconis::config {
+            inline constexpr std::array<const char*, ${toString backendCount}> CONTAINER_INFO_BACKENDS = {
+              ${backendValues}
+            };
+          } // namespace draconis::config
+        '';
+
         mkPluginRoot = {
           # By default, package every plugin in this repository. Pass a smaller
           # list when you want a package containing only selected plugins.
           names ? pluginNames,
+          containerInfo ? null,
         }:
           pkgs.stdenvNoCC.mkDerivation {
             pname = "draconisplusplus-plugin-lab";
@@ -62,6 +86,9 @@
             + builtins.concatStringsSep "\n" (map (name: ''
               cp -R "${name}" "$out/${name}"
             '') names)
+            + nixpkgs.lib.optionalString (containerInfo != null && builtins.elem "container_info" names) ''
+              cp ${pkgs.writeText "container-info-config.hpp" (containerInfoConfigHeader containerInfo)} "$out/container_info/config.hpp"
+            ''
             + ''
               runHook postInstall
             '';
