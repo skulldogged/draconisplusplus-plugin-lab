@@ -92,8 +92,9 @@ should only receive plugin roots through `pluginPackages` or `pluginDirs`.
 ### `container_info`
 
 Reports local container runtime availability and counts without invoking
-container CLI tools. It checks Docker, Podman, containerd, CRI-compatible
-runtimes such as CRI-O, and LXD/LXC exposed through LXD local APIs.
+container CLI tools. It checks Docker, Podman, WSL Containers, containerd,
+CRI-compatible runtimes such as CRI-O, and LXD/LXC exposed through LXD local
+APIs.
 
 It reports these fields:
 
@@ -104,7 +105,13 @@ It reports these fields:
   `available`, `active`, `running`, `total`, `version`, and `endpoint`
 
 Display output uses the first available runtime in priority order:
-Docker, Podman, containerd, CRI, then LXD.
+Docker, Podman, WSL Containers, containerd, CRI, then LXD.
+
+WSL Containers support uses the same local COM service path as `wslc.exe`,
+based on the open-source WSL service IDL. The public SDK documentation does not
+currently expose a container-listing wrapper, but the local service provides
+`IWSLCSession::ListContainers`. The plugin uses that API for active WSLC
+sessions and never shells out to `wslc.exe`.
 
 For precompiled/static builds, configure which backends are checked through
 the plugin root:
@@ -119,7 +126,7 @@ For runtime plugin builds, use
 `~/.config/draconis++/plugins/container_info.toml`:
 
 ```toml
-backends = ["docker", "podman", "containerd", "cri", "lxd"]
+backends = ["docker", "podman", "wsl", "containerd", "cri", "lxd"]
 ```
 
 The same key can also be set under `[plugins.container_info]` in the main

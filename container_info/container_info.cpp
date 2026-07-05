@@ -12,6 +12,7 @@
 #include <charconv>
 #include <chrono>
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <curl/curl.h>
 #include <filesystem>
@@ -42,6 +43,7 @@ using enum DracErrorCode;
     #define WIN32_LEAN_AND_MEAN
   #endif
   #include <windows.h>
+  #include <objbase.h>
 #endif
 
 #if DRAC_PRECOMPILED_CONFIG && __has_include("config.hpp")
@@ -96,6 +98,101 @@ namespace {
   namespace dto = container_info::dto;
   namespace fs  = std::filesystem;
 
+#ifdef _WIN32
+  namespace wslc_api {
+    constexpr ULONG WSLC_CONTAINER_ID_LENGTH         = 64;
+    constexpr ULONG WSLC_MAX_CONTAINER_NAME_LENGTH  = 255;
+    constexpr ULONG WSLC_MAX_IMAGE_NAME_LENGTH      = 255;
+    constexpr DWORD WSLC_LIST_CONTAINERS_FLAGS_ALL  = 1;
+
+    enum WSLCContainerState {
+      WslcContainerStateInvalid = 0,
+      WslcContainerStateCreated = 1,
+      WslcContainerStateRunning = 2,
+      WslcContainerStateExited  = 3,
+      WslcContainerStateDeleted = 4,
+    };
+
+    struct WSLCVersion {
+      std::uint32_t Major;
+      std::uint32_t Minor;
+      std::uint32_t Revision;
+    };
+
+    struct WSLCFilter {
+      LPCSTR Key;
+      LPCSTR Value;
+    };
+
+    struct WSLCListContainersOptions {
+      DWORD             Flags;
+      LONG              Limit;
+      const WSLCFilter* Filters;
+      ULONG             FiltersCount;
+    };
+
+    using WSLCContainerId = char[WSLC_CONTAINER_ID_LENGTH + 1];
+
+    struct WSLCContainerEntry {
+      char               Name[WSLC_MAX_CONTAINER_NAME_LENGTH + 1];
+      char               Image[WSLC_MAX_IMAGE_NAME_LENGTH + 1];
+      WSLCContainerId    Id;
+      ULONGLONG          StateChangedAt;
+      ULONGLONG          CreatedAt;
+      WSLCContainerState State;
+    };
+
+    struct WSLCContainerPortMapping;
+
+    struct WSLCSessionListEntry {
+      ULONG   SessionId;
+      DWORD   CreatorPid;
+      wchar_t DisplayName[256];
+      wchar_t Sid[257];
+    };
+
+    struct IWSLCSession : IUnknown {
+      virtual HRESULT STDMETHODCALLTYPE GetId(ULONG*)                                                     = 0;
+      virtual HRESULT STDMETHODCALLTYPE GetDisplayName(LPWSTR*)                                           = 0;
+      virtual HRESULT STDMETHODCALLTYPE GetState(void*)                                                   = 0;
+      virtual HRESULT STDMETHODCALLTYPE GetTerminationEvent(HANDLE*)                                      = 0;
+      virtual HRESULT STDMETHODCALLTYPE GetTerminationReason(void*, LPWSTR*)                              = 0;
+      virtual HRESULT STDMETHODCALLTYPE PullImage(LPCSTR, LPCSTR, void*, void*)                           = 0;
+      virtual HRESULT STDMETHODCALLTYPE BuildImage(const void*, void*, HANDLE)                            = 0;
+      virtual HRESULT STDMETHODCALLTYPE LoadImage(void*, ULONGLONG, void*, void*)                         = 0;
+      virtual HRESULT STDMETHODCALLTYPE ImportImage(void*, LPCSTR, ULONGLONG, void*, LPSTR*)              = 0;
+      virtual HRESULT STDMETHODCALLTYPE SaveImage(void*, LPCSTR, void*, HANDLE)                           = 0;
+      virtual HRESULT STDMETHODCALLTYPE SaveImages(void*, const void*, void*, HANDLE)                     = 0;
+      virtual HRESULT STDMETHODCALLTYPE ListImages(const void*, void*, ULONG*)                            = 0;
+      virtual HRESULT STDMETHODCALLTYPE DeleteImage(const void*, void*, ULONG*)                           = 0;
+      virtual HRESULT STDMETHODCALLTYPE TagImage(const void*)                                             = 0;
+      virtual HRESULT STDMETHODCALLTYPE InspectImage(LPCSTR, LPSTR*)                                     = 0;
+      virtual HRESULT STDMETHODCALLTYPE PruneImages(const void*, ULONG, void*, ULONG*, ULONGLONG*)        = 0;
+      virtual HRESULT STDMETHODCALLTYPE CreateContainer(const void*, void*, void**)                       = 0;
+      virtual HRESULT STDMETHODCALLTYPE OpenContainer(LPCSTR, void**)                                    = 0;
+      virtual HRESULT STDMETHODCALLTYPE ListContainers(
+        const WSLCListContainersOptions*, WSLCContainerEntry**, ULONG*, WSLCContainerPortMapping**, ULONG*) = 0;
+    };
+
+    struct IWSLCSessionManager : IUnknown {
+      virtual HRESULT STDMETHODCALLTYPE GetVersion(WSLCVersion*)                                         = 0;
+      virtual HRESULT STDMETHODCALLTYPE CreateSession(const void*, DWORD, void*, IWSLCSession**)         = 0;
+      virtual HRESULT STDMETHODCALLTYPE EnterSession(LPCWSTR, LPCWSTR, void*, IWSLCSession**)           = 0;
+      virtual HRESULT STDMETHODCALLTYPE ListSessions(WSLCSessionListEntry**, ULONG*)                     = 0;
+      virtual HRESULT STDMETHODCALLTYPE OpenSession(ULONG, IWSLCSession**)                               = 0;
+      virtual HRESULT STDMETHODCALLTYPE OpenSessionByName(LPCWSTR, IWSLCSession**)                       = 0;
+    };
+
+    inline constexpr GUID CLSID_WSLCSessionManager {
+      0xa9b7a1b9, 0x0671, 0x405c, { 0x95, 0xf1, 0xe0, 0x61, 0x2c, 0xb4, 0xce, 0x8f }
+    };
+
+    inline constexpr GUID IID_IWSLCSessionManager {
+      0x82a7abc8, 0x6b50, 0x43fc, { 0xab, 0x96, 0x15, 0xfb, 0xbe, 0x7e, 0x87, 0x60 }
+    };
+  } // namespace wslc_api
+#endif
+
   constexpr long CONNECT_TIMEOUT_MS = 350;
   constexpr long TOTAL_TIMEOUT_MS   = 900;
 
@@ -134,6 +231,7 @@ namespace {
       "containerd",
       "cri",
       "lxd",
+      "wsl",
     };
   };
 
@@ -160,6 +258,8 @@ namespace {
       return "cri";
     if (normalized == "lxc")
       return "lxd";
+    if (normalized == "wslc" || normalized == "wslcontainer" || normalized == "wslcontainers")
+      return "wsl";
     return normalized;
   }
 
@@ -180,7 +280,7 @@ namespace {
       const String value = NormalizeBackend(backend);
       if (value == "all")
         return ContainerInfoConfig {};
-      if (value == "docker" || value == "podman" || value == "containerd" || value == "cri" || value == "lxd")
+      if (value == "docker" || value == "podman" || value == "containerd" || value == "cri" || value == "lxd" || value == "wsl")
         if (!std::ranges::contains(normalized, value))
           normalized.push_back(value);
     }
@@ -903,6 +1003,140 @@ namespace {
     };
   }
 
+#ifdef _WIN32
+  auto HResultString(HRESULT hr) -> String {
+    return std::format("0x{:08X}", static_cast<unsigned int>(static_cast<std::uint32_t>(hr)));
+  }
+
+  void ReleaseUnknown(IUnknown* unknown) {
+    if (unknown != nullptr)
+      unknown->Release();
+  }
+
+  void ConfigureComProxy(IUnknown* unknown) {
+    if (unknown == nullptr)
+      return;
+
+    (void)CoSetProxyBlanket(
+      unknown,
+      RPC_C_AUTHN_DEFAULT,
+      RPC_C_AUTHZ_DEFAULT,
+      COLE_DEFAULT_PRINCIPAL,
+      RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+      RPC_C_IMP_LEVEL_IMPERSONATE,
+      nullptr,
+      EOAC_NONE);
+  }
+#endif
+
+  auto CollectWslContainers() -> RuntimeInfo {
+    RuntimeInfo runtime {
+      .id          = "wsl",
+      .displayName = "WSL Containers",
+      .kind        = "wsl",
+    };
+
+#ifdef _WIN32
+    runtime.endpoint = "WSLCSessionManager";
+    HMODULE sdk = LoadLibraryW(L"wslcsdk.dll");
+    using WslcGetVersionFn = HRESULT(WINAPI*)(wslc_api::WSLCVersion*);
+    if (sdk != nullptr) {
+      auto* getVersionProc = reinterpret_cast<WslcGetVersionFn>(GetProcAddress(sdk, "WslcGetVersion"));
+      if (getVersionProc != nullptr) {
+        wslc_api::WSLCVersion version {};
+        if (SUCCEEDED(getVersionProc(&version)))
+          runtime.version = std::format("{}.{}.{}", version.Major, version.Minor, version.Revision);
+      }
+      FreeLibrary(sdk);
+    }
+
+    const HRESULT initHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool    uninitCom = SUCCEEDED(initHr);
+    if (FAILED(initHr) && initHr != RPC_E_CHANGED_MODE) {
+      runtime.error = std::format("Failed to initialize COM for WSL Containers: {}", HResultString(initHr));
+      return runtime;
+    }
+
+    wslc_api::IWSLCSessionManager* manager = nullptr;
+    HRESULT hr = CoCreateInstance(
+      wslc_api::CLSID_WSLCSessionManager,
+      nullptr,
+      CLSCTX_LOCAL_SERVER,
+      wslc_api::IID_IWSLCSessionManager,
+      reinterpret_cast<void**>(&manager));
+    if (FAILED(hr)) {
+      if (uninitCom)
+        CoUninitialize();
+      runtime.error = (hr == REGDB_E_CLASSNOTREG) ? Option<String>("No local WSL container API found")
+                                                  : Option<String>(std::format("Failed to open WSL container service: {}", HResultString(hr)));
+      return runtime;
+    }
+
+    ConfigureComProxy(manager);
+    if (runtime.version.empty()) {
+      wslc_api::WSLCVersion version {};
+      if (SUCCEEDED(manager->GetVersion(&version)))
+        runtime.version = std::format("{}.{}.{}", version.Major, version.Minor, version.Revision);
+    }
+
+    wslc_api::WSLCSessionListEntry* sessions = nullptr;
+    ULONG                          sessionCount = 0;
+    hr = manager->ListSessions(&sessions, &sessionCount);
+    if (FAILED(hr)) {
+      ReleaseUnknown(manager);
+      if (uninitCom)
+        CoUninitialize();
+      runtime.error = std::format("Failed to list WSL container sessions: {}", HResultString(hr));
+      return runtime;
+    }
+
+    runtime.available = true;
+
+    for (ULONG i = 0; i < sessionCount; ++i) {
+      wslc_api::IWSLCSession* session = nullptr;
+      hr = manager->OpenSession(sessions[i].SessionId, &session);
+      if (FAILED(hr))
+        continue;
+
+      ConfigureComProxy(session);
+      wslc_api::WSLCListContainersOptions options {
+        .Flags        = wslc_api::WSLC_LIST_CONTAINERS_FLAGS_ALL,
+        .Limit        = -1,
+        .Filters      = nullptr,
+        .FiltersCount = 0,
+      };
+      wslc_api::WSLCContainerEntry*        containers = nullptr;
+      ULONG                               containerCount = 0;
+      wslc_api::WSLCContainerPortMapping* ports = nullptr;
+      ULONG                               portsCount = 0;
+      hr = session->ListContainers(&options, &containers, &containerCount, &ports, &portsCount);
+      if (SUCCEEDED(hr)) {
+        runtime.total += containerCount;
+        for (ULONG n = 0; n < containerCount; ++n)
+          if (containers[n].State == wslc_api::WslcContainerStateRunning)
+            ++runtime.running;
+      } else if (!runtime.error) {
+        runtime.error = std::format("Failed to list WSL containers in session {}: {}", sessions[i].SessionId, HResultString(hr));
+      }
+
+      CoTaskMemFree(containers);
+      CoTaskMemFree(ports);
+      ReleaseUnknown(session);
+    }
+
+    CoTaskMemFree(sessions);
+    ReleaseUnknown(manager);
+    if (uninitCom)
+      CoUninitialize();
+
+    runtime.active = runtime.running > 0;
+    return runtime;
+#else
+    runtime.error = "No local WSL container API found";
+    return runtime;
+#endif
+  }
+
   auto IsAbsentRuntimeError(StringView error) -> bool {
     return HasPrefix(error, "No local ") || HasPrefix(error, "No usable ");
   }
@@ -937,6 +1171,8 @@ namespace {
       data.runtimes.push_back(CollectDockerLike(RuntimeKind::Docker, "docker", "Docker", DockerEndpoints()));
     if (BackendEnabled(config, "podman"))
       data.runtimes.push_back(CollectDockerLike(RuntimeKind::Podman, "podman", "Podman", PodmanEndpoints()));
+    if (BackendEnabled(config, "wsl"))
+      data.runtimes.push_back(CollectWslContainers());
     if (BackendEnabled(config, "containerd"))
       data.runtimes.push_back(CollectContainerd());
     if (BackendEnabled(config, "cri"))
