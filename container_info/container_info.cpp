@@ -14,8 +14,10 @@
 #include <cctype>
 #include <cstdlib>
 #include <curl/curl.h>
+#include <filesystem>
 #include <format>
 #include <glaze/glaze.hpp>
+#include <glaze/toml.hpp>
 #include <map>
 #include <optional>
 #include <set>
@@ -40,8 +42,6 @@ using enum DracErrorCode;
     #define WIN32_LEAN_AND_MEAN
   #endif
   #include <windows.h>
-#else
-  #include <filesystem>
 #endif
 
 namespace container_info::dto {
@@ -71,10 +71,23 @@ namespace container_info::dto {
   struct LxdInfoResponse {
     LxdInfoMetadata metadata;
   };
+
+  struct TomlConfig {
+    Vec<String> backends;
+  };
+
+  struct TomlPlugins {
+    TomlConfig container_info;
+  };
+
+  struct TomlMainConfig {
+    TomlPlugins plugins;
+  };
 } // namespace container_info::dto
 
 namespace {
   namespace dto = container_info::dto;
+  namespace fs  = std::filesystem;
 
   constexpr long CONNECT_TIMEOUT_MS = 350;
   constexpr long TOTAL_TIMEOUT_MS   = 900;
@@ -107,6 +120,16 @@ namespace {
     Vec<RuntimeInfo> runtimes;
   };
 
+  struct ContainerInfoConfig {
+    Vec<String> backends {
+      "docker",
+      "podman",
+      "containerd",
+      "cri",
+      "lxd",
+    };
+  };
+
   auto HasPrefix(StringView value, StringView prefix) -> bool {
     return value.size() >= prefix.size() && value.substr(0, prefix.size()) == prefix;
   }
@@ -117,6 +140,92 @@ namespace {
       return static_cast<char>(std::tolower(ch));
     });
     return result;
+  }
+
+  auto NormalizeBackend(StringView backend) -> String {
+    String normalized = ToLower(backend);
+    std::erase_if(normalized, [](unsigned char ch) {
+      return std::isspace(ch) || ch == '_' || ch == '-';
+    });
+    if (normalized == "dockerengine")
+      return "docker";
+    if (normalized == "kubernetescri" || normalized == "crio" || normalized == "cri-o")
+      return "cri";
+    if (normalized == "lxc")
+      return "lxd";
+    return normalized;
+  }
+
+  auto BackendEnabled(const ContainerInfoConfig& config, StringView backend) -> bool {
+    const String normalizedBackend = NormalizeBackend(backend);
+    return std::ranges::any_of(config.backends, [&normalizedBackend](StringView configured) {
+      return NormalizeBackend(configured) == normalizedBackend;
+    });
+  }
+
+  auto ParseConfig(const dto::TomlConfig& tomlCfg) -> ContainerInfoConfig {
+    ContainerInfoConfig config;
+    if (!tomlCfg.backends.empty())
+      config.backends = tomlCfg.backends;
+
+    Vec<String> normalized;
+    for (StringView backend : config.backends) {
+      const String value = NormalizeBackend(backend);
+      if (value == "all")
+        return ContainerInfoConfig {};
+      if (value == "docker" || value == "podman" || value == "containerd" || value == "cri" || value == "lxd")
+        if (!std::ranges::contains(normalized, value))
+          normalized.push_back(value);
+    }
+
+    config.backends = std::move(normalized);
+    return config;
+  }
+
+  auto LoadConfigFromToml(StringView tomlConfig, StringView sourceName) -> Result<ContainerInfoConfig> {
+    dto::TomlConfig tomlCfg;
+    String          buffer(tomlConfig);
+    glz::context    ctx {};
+    ctx.current_file = String(sourceName);
+
+    if (const auto readError = glz::read<glz::opts { .format = glz::TOML, .error_on_unknown_keys = false }>(tomlCfg, buffer, ctx); readError)
+      ERR_FMT(ParseError, "Failed to parse container_info config: {}", glz::format_error(readError, buffer));
+
+    return ParseConfig(tomlCfg);
+  }
+
+  auto LoadConfigFromFilesystem(const fs::path& configDir) -> Result<ContainerInfoConfig> {
+    const fs::path pluginConfigPath = configDir / "container_info.toml";
+    if (fs::exists(pluginConfigPath)) {
+      String       buffer;
+      glz::context ctx {};
+      ctx.current_file = pluginConfigPath.string();
+      if (const auto fileError = glz::file_to_buffer(buffer, ctx.current_file); bool(fileError))
+        ERR_FMT(IoError, "Failed to read {}", pluginConfigPath.string());
+
+      dto::TomlConfig tomlCfg;
+      if (const auto readError = glz::read<glz::opts { .format = glz::TOML, .error_on_unknown_keys = false }>(tomlCfg, buffer, ctx); readError)
+        ERR_FMT(ParseError, "Failed to parse {}: {}", pluginConfigPath.string(), glz::format_error(readError, buffer));
+
+      return ParseConfig(tomlCfg);
+    }
+
+    const fs::path mainConfigPath = configDir.parent_path() / "config.toml";
+    if (fs::exists(mainConfigPath)) {
+      String       buffer;
+      glz::context ctx {};
+      ctx.current_file = mainConfigPath.string();
+      if (const auto fileError = glz::file_to_buffer(buffer, ctx.current_file); bool(fileError))
+        ERR_FMT(IoError, "Failed to read {}", mainConfigPath.string());
+
+      dto::TomlMainConfig tomlCfg;
+      if (const auto readError = glz::read<glz::opts { .format = glz::TOML, .error_on_unknown_keys = false }>(tomlCfg, buffer, ctx); readError)
+        ERR_FMT(ParseError, "Failed to parse {}: {}", mainConfigPath.string(), glz::format_error(readError, buffer));
+
+      return ParseConfig(tomlCfg.plugins.container_info);
+    }
+
+    return ContainerInfoConfig {};
   }
 
   auto ParseDockerContainers(StringView body) -> Result<Pair<u64, u64>> {
@@ -393,11 +502,13 @@ namespace {
       }
 
       Result<HttpResponse> versionResponse = HttpGet(endpoint, kind == RuntimeKind::Podman ? "/libpod/version" : "/version");
-      if (!versionResponse && kind == RuntimeKind::Podman)
-        versionResponse = HttpGet(endpoint, "/version");
-
-      if (versionResponse)
+      if (versionResponse) {
         runtime.version = ParseDockerVersion(versionResponse->body);
+      } else if (kind == RuntimeKind::Podman) {
+        Result<HttpResponse> fallbackVersionResponse = HttpGet(endpoint, "/version");
+        if (fallbackVersionResponse)
+          runtime.version = ParseDockerVersion(fallbackVersionResponse->body);
+      }
 
       Result<HttpResponse> containersResponse = HttpGet(endpoint, "/containers/json?all=true");
       if (!containersResponse) {
@@ -783,6 +894,10 @@ namespace {
     for (const RuntimeInfo& runtime : data.runtimes)
       if (runtime.error && !IsAbsentRuntimeError(*runtime.error))
         diagnostics.push_back(std::format("{}: {}", runtime.displayName, *runtime.error));
+
+    if (diagnostics.empty() && !std::ranges::any_of(data.runtimes, [](const RuntimeInfo& runtime) { return runtime.available; }))
+      diagnostics.push_back("No selected container backend is available through a supported local API");
+
     return diagnostics;
   }
 
@@ -796,15 +911,20 @@ namespace {
     return joined;
   }
 
-  auto CollectAllRuntimes() -> ContainerInfoData {
+  auto CollectAllRuntimes(const ContainerInfoConfig& config) -> ContainerInfoData {
     static CurlGlobal curlGlobal;
 
     ContainerInfoData data;
-    data.runtimes.push_back(CollectDockerLike(RuntimeKind::Docker, "docker", "Docker", DockerEndpoints()));
-    data.runtimes.push_back(CollectDockerLike(RuntimeKind::Podman, "podman", "Podman", PodmanEndpoints()));
-    data.runtimes.push_back(CollectContainerd());
-    data.runtimes.push_back(CollectCri());
-    data.runtimes.push_back(CollectLxd());
+    if (BackendEnabled(config, "docker"))
+      data.runtimes.push_back(CollectDockerLike(RuntimeKind::Docker, "docker", "Docker", DockerEndpoints()));
+    if (BackendEnabled(config, "podman"))
+      data.runtimes.push_back(CollectDockerLike(RuntimeKind::Podman, "podman", "Podman", PodmanEndpoints()));
+    if (BackendEnabled(config, "containerd"))
+      data.runtimes.push_back(CollectContainerd());
+    if (BackendEnabled(config, "cri"))
+      data.runtimes.push_back(CollectCri());
+    if (BackendEnabled(config, "lxd"))
+      data.runtimes.push_back(CollectLxd());
 
     for (const RuntimeInfo& runtime : data.runtimes) {
       data.totalRunning += runtime.running;
@@ -831,9 +951,25 @@ namespace {
       return m_metadata;
     }
 
+    auto setConfig(StringView tomlConfig) -> Result<Unit> override {
+      if (tomlConfig.empty())
+        return {};
+
+      m_runtimeConfig = String(tomlConfig);
+      return {};
+    }
+
     auto initialize(const PluginContext& ctx, PluginCache& cache) -> Result<Unit> override {
-      (void)ctx;
       (void)cache;
+
+      if (m_runtimeConfig)
+        m_config = TRY(LoadConfigFromToml(*m_runtimeConfig, "container_info runtime config"));
+      else
+        m_config = TRY(LoadConfigFromFilesystem(ctx.configDir));
+
+      if (m_config.backends.empty())
+        ERR(ConfigurationError, "container_info has no enabled backends");
+
       m_ready = true;
       return {};
     }
@@ -856,7 +992,7 @@ namespace {
 
     auto collectData(PluginCache& cache) -> Result<Unit> override {
       (void)cache;
-      m_data = CollectAllRuntimes();
+      m_data = CollectAllRuntimes(m_config);
       Vec<String> diagnostics = RuntimeDiagnostics(m_data);
       m_lastError = None;
       if (!diagnostics.empty())
@@ -880,7 +1016,7 @@ namespace {
 
     [[nodiscard]] auto getDisplayValue() const -> Result<String> override {
       for (const RuntimeInfo& runtime : m_data.runtimes) {
-        if (runtime.active)
+        if (runtime.available)
           return std::format("{} {}/{}", runtime.displayName, runtime.running, runtime.total);
       }
 
@@ -904,8 +1040,10 @@ namespace {
 
    private:
     PluginMetadata    m_metadata;
+    ContainerInfoConfig m_config;
     ContainerInfoData m_data;
     Option<String>    m_lastError;
+    Option<String>    m_runtimeConfig;
     bool              m_ready = false;
   };
 

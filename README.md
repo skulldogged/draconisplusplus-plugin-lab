@@ -101,11 +101,21 @@ It reports these fields:
 - `total_running`: total running containers across detected runtimes
 - `total_containers`: total containers across detected runtimes
 - `runtimes`: array of runtime objects with `id`, `display_name`, `kind`,
-  `available`, `active`, `running`, `total`, `version`, `endpoint`, and
-  optional `error`
+  `available`, `active`, `running`, `total`, `version`, and `endpoint`
 
-Display output uses the first active runtime in priority order:
+Display output uses the first available runtime in priority order:
 Docker, Podman, containerd, CRI, then LXD.
+
+Configure which backends are checked with
+`~/.config/draconis++/plugins/container_info.toml`:
+
+```toml
+backends = ["docker", "podman", "containerd", "cri", "lxd"]
+```
+
+The same key can also be set under `[plugins.container_info]` in the main
+Draconis++ `config.toml`. Omit `backends`, or use `["all"]`, to check every
+supported backend.
 
 Example layout row:
 
