@@ -30,6 +30,12 @@
           inherit system;
         };
 
+        pluginBuildInputs = with pkgs.pkgsStatic; [
+          curl
+          grpc
+          protobuf
+        ];
+
         mkPluginRoot = {
           # By default, package every plugin in this repository. Pass a smaller
           # list when you want a package containing only selected plugins.
@@ -42,6 +48,9 @@
 
             dontConfigure = true;
             dontBuild = true;
+            passthru = {
+              inherit pluginBuildInputs;
+            };
 
             # A plugin package is just a plugin root: a directory whose direct
             # children are plugin directories. Draconis++ receives this path via
@@ -61,7 +70,7 @@
         allPlugins = mkPluginRoot {};
       in {
         lib = {
-          inherit mkPluginRoot;
+          inherit mkPluginRoot pluginBuildInputs;
         };
 
         packages =

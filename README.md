@@ -61,6 +61,12 @@ programs.draconisplusplus = {
 };
 ```
 
+`container_info` needs libcurl, gRPC, and protobuf available to the Draconis++
+build because its manifest declares `libcurl`, `grpc++`, and `protobuf`. The
+flake exposes those as
+`lib.${system}.pluginBuildInputs` and each package also carries them in
+`passthru.pluginBuildInputs`.
+
 ## Customizing
 
 To add another plugin, create a new plugin directory, then update:
