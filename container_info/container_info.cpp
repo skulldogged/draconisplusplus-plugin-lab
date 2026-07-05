@@ -761,7 +761,7 @@ namespace {
   }
 
   auto RuntimeFields(const RuntimeInfo& runtime) -> PluginFieldObject {
-    PluginFieldObject fields {
+    return PluginFieldObject {
       { "id", runtime.id },
       { "display_name", runtime.displayName },
       { "kind", runtime.kind },
@@ -772,9 +772,28 @@ namespace {
       { "version", runtime.version },
       { "endpoint", runtime.endpoint },
     };
-    if (runtime.error)
-      fields["error"] = *runtime.error;
-    return fields;
+  }
+
+  auto IsAbsentRuntimeError(StringView error) -> bool {
+    return HasPrefix(error, "No local ") || HasPrefix(error, "No usable ");
+  }
+
+  auto RuntimeDiagnostics(const ContainerInfoData& data) -> Vec<String> {
+    Vec<String> diagnostics;
+    for (const RuntimeInfo& runtime : data.runtimes)
+      if (runtime.error && !IsAbsentRuntimeError(*runtime.error))
+        diagnostics.push_back(std::format("{}: {}", runtime.displayName, *runtime.error));
+    return diagnostics;
+  }
+
+  auto JoinDiagnostics(const Vec<String>& diagnostics) -> String {
+    String joined;
+    for (const String& diagnostic : diagnostics) {
+      if (!joined.empty())
+        joined += "; ";
+      joined += diagnostic;
+    }
+    return joined;
   }
 
   auto CollectAllRuntimes() -> ContainerInfoData {
@@ -838,7 +857,10 @@ namespace {
     auto collectData(PluginCache& cache) -> Result<Unit> override {
       (void)cache;
       m_data = CollectAllRuntimes();
+      Vec<String> diagnostics = RuntimeDiagnostics(m_data);
       m_lastError = None;
+      if (!diagnostics.empty())
+        m_lastError = JoinDiagnostics(diagnostics);
       return {};
     }
 
@@ -861,6 +883,9 @@ namespace {
         if (runtime.active)
           return std::format("{} {}/{}", runtime.displayName, runtime.running, runtime.total);
       }
+
+      if (m_lastError)
+        ERR(NotFound, *m_lastError);
 
       ERR(NotFound, "No running local containers found");
     }
