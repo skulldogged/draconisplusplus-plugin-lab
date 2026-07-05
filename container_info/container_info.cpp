@@ -44,7 +44,38 @@ using enum DracErrorCode;
   #include <filesystem>
 #endif
 
+namespace container_info::dto {
+  struct DockerContainer {
+    String State;
+    String Status;
+  };
+
+  struct DockerVersion {
+    String Version;
+    String ApiVersion;
+  };
+
+  struct LxdInstance {
+    String type = "container";
+    String status;
+  };
+
+  struct LxdInstancesResponse {
+    Vec<LxdInstance> metadata;
+  };
+
+  struct LxdInfoMetadata {
+    String api_version;
+  };
+
+  struct LxdInfoResponse {
+    LxdInfoMetadata metadata;
+  };
+} // namespace container_info::dto
+
 namespace {
+  namespace dto = container_info::dto;
+
   constexpr long CONNECT_TIMEOUT_MS = 350;
   constexpr long TOTAL_TIMEOUT_MS   = 900;
 
@@ -87,35 +118,6 @@ namespace {
     });
     return result;
   }
-
-  namespace dto {
-    struct DockerContainer {
-      String State;
-      String Status;
-    };
-
-    struct DockerVersion {
-      String Version;
-      String ApiVersion;
-    };
-
-    struct LxdInstance {
-      String type = "container";
-      String status;
-    };
-
-    struct LxdInstancesResponse {
-      Vec<LxdInstance> metadata;
-    };
-
-    struct LxdInfoMetadata {
-      String api_version;
-    };
-
-    struct LxdInfoResponse {
-      LxdInfoMetadata metadata;
-    };
-  } // namespace dto
 
   auto ParseDockerContainers(StringView body) -> Result<Pair<u64, u64>> {
     const String buffer(body);
