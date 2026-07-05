@@ -15,7 +15,7 @@
     # Keep this list in sync with the plugin directories in the repository.
     # Each name should be a direct child directory with a plugin.json manifest.
     pluginNames = [
-      "example_status"
+      "container_info"
       "vpn_info"
     ];
   in
@@ -30,33 +30,10 @@
           inherit system;
         };
 
-        escapeCppString =
-          value:
-            builtins.replaceStrings
-            ["\\" "\""]
-            ["\\\\" "\\\""]
-            (toString value);
-
-        # This function returns the C++ header that will be copied to
-        # example_status/config.hpp when users pass exampleStatus = { ... } to
-        # mkPluginRoot. Add your own plugin-specific generated headers in the
-        # same style.
-        exampleStatusConfigHeader = exampleStatus: ''
-          #pragma once
-
-          namespace draconis::config {
-            inline constexpr const char* EXAMPLE_STATUS_MESSAGE = "${escapeCppString (exampleStatus.message or "Hello from a configured external plugin")}";
-          } // namespace draconis::config
-        '';
-
         mkPluginRoot = {
           # By default, package every plugin in this repository. Pass a smaller
           # list when you want a package containing only selected plugins.
           names ? pluginNames,
-
-          # Optional precompiled config for the example plugin. If null, no
-          # config.hpp is generated and the plugin uses its runtime defaults.
-          exampleStatus ? null,
         }:
           pkgs.stdenvNoCC.mkDerivation {
             pname = "draconisplusplus-plugin-lab";
@@ -76,9 +53,6 @@
             + builtins.concatStringsSep "\n" (map (name: ''
               cp -R "${name}" "$out/${name}"
             '') names)
-            + nixpkgs.lib.optionalString (exampleStatus != null) ''
-              cp ${pkgs.writeText "example-status-config.hpp" (exampleStatusConfigHeader exampleStatus)} "$out/example_status/config.hpp"
-            ''
             + ''
               runHook postInstall
             '';

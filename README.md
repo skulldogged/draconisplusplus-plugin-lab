@@ -6,15 +6,14 @@ This repo keeps plugin development separate from Draconis++ core while still
 building cleanly through the core plugin system. It includes:
 
 - a self-contained plugin directory with `plugin.json`
-- a simple `IInfoProviderPlugin`
+- local `IInfoProviderPlugin` implementations
 - a Nix flake that exposes plugin-root packages
-- optional per-plugin precompiled config via `example_status/config.hpp`
 
 ## Layout
 
 ```text
-example_status/
-  example_status.cpp
+container_info/
+  container_info.cpp
   plugin.json
 vpn_info/
   vpn_info.cpp
@@ -47,30 +46,10 @@ The flake exposes plugin-root packages:
 
 - `packages.${system}.default`
 - `packages.${system}.all`
-- `packages.${system}.example_status`
+- `packages.${system}.container_info`
 - `packages.${system}.vpn_info`
 
-For precompiled plugin config, use `lib.${system}.mkPluginRoot` to generate a
-configured copy of this plugin root. The generated header is written to
-`example_status/config.hpp`, where the plugin includes it in
-`DRAC_PRECOMPILED_CONFIG` builds.
-
-```nix
-programs.draconisplusplus = {
-  enable = true;
-  configFormat = "hpp";
-  pluginPackages = [
-    (inputs.my-draconis-plugin.lib.${pkgs.system}.mkPluginRoot {
-      exampleStatus = {
-        message = "Built into Draconis++";
-      };
-    })
-  ];
-  staticPlugins = ["example_status"];
-};
-```
-
-For a non-configured plugin root:
+Example plugin-root usage:
 
 ```nix
 programs.draconisplusplus = {
@@ -84,12 +63,11 @@ programs.draconisplusplus = {
 
 ## Customizing
 
-Rename `example_status` to your plugin name, then update:
+To add another plugin, create a new plugin directory, then update:
 
-- `example_status/plugin.json`
+- `<plugin_name>/plugin.json`
 - the C++ class and `DRAC_PLUGIN(...)` registration
 - `pluginNames` in `flake.nix`
-- any generated config header logic in `flake.nix`
 
 Manifest notes:
 
@@ -104,6 +82,37 @@ Keep plugin-specific Nix config in this repository. The core Draconis++ module
 should only receive plugin roots through `pluginPackages` or `pluginDirs`.
 
 ## Included Plugins
+
+### `container_info`
+
+Reports local container runtime availability and counts without invoking
+container CLI tools. It checks Docker, Podman, containerd, CRI-compatible
+runtimes such as CRI-O, and LXD/LXC exposed through LXD local APIs.
+
+It reports these fields:
+
+- `active`: true when any supported runtime has running containers
+- `total_running`: total running containers across detected runtimes
+- `total_containers`: total containers across detected runtimes
+- `runtimes`: array of runtime objects with `id`, `display_name`, `kind`,
+  `available`, `active`, `running`, `total`, `version`, `endpoint`, and
+  optional `error`
+
+Display output uses the first active runtime in priority order:
+Docker, Podman, containerd, CRI, then LXD.
+
+Example layout row:
+
+```nix
+programs.draconisplusplus.layout = [
+  {
+    name = "containers";
+    rows = [
+      { key = "plugin.container_info"; }
+    ];
+  }
+];
+```
 
 ### `vpn_info`
 
