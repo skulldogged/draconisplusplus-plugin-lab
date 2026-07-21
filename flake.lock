@@ -11,11 +11,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1784675204,
-        "narHash": "sha256-ji33CqP4iNqCHQjkf0CWPr4gwI9nJy2fv/hUJN2icnM=",
+        "lastModified": 1784675650,
+        "narHash": "sha256-ZiFAPZuJjRn+keOa0yn4YH3YvSmL5U7FfI3OPvCBGyg=",
         "owner": "skulldogged",
         "repo": "draconisplusplus-monorepo",
-        "rev": "d56f7bd176ee691df0a57c5b7bd2d39cf7a2b907",
+        "rev": "032246ed1e484090315d7379aed94b457c669fc9",
         "type": "github"
       },
       "original": {
