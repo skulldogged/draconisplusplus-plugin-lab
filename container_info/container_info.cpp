@@ -10,7 +10,6 @@
 #include <array>
 #include <cassert>
 #include <charconv>
-#include <chrono>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
@@ -19,14 +18,9 @@
 #include <format>
 #include <glaze/glaze.hpp>
 #include <glaze/toml.hpp>
-#include <map>
 #include <optional>
-#include <set>
 #include <string_view>
 #include <utility>
-
-#include <grpcpp/generic/generic_stub.h>
-#include <grpcpp/grpcpp.h>
 
 #include <Drac++/Core/Plugin.hpp>
 
@@ -199,9 +193,6 @@ namespace {
   enum class RuntimeKind {
     Docker,
     Podman,
-    Containerd,
-    Cri,
-    Lxd,
   };
 
   struct RuntimeInfo {
@@ -228,8 +219,6 @@ namespace {
     Vec<String> backends {
       "docker",
       "podman",
-      "containerd",
-      "cri",
       "lxd",
       "wsl",
     };
@@ -254,8 +243,6 @@ namespace {
     });
     if (normalized == "dockerengine")
       return "docker";
-    if (normalized == "kubernetescri" || normalized == "crio" || normalized == "cri-o")
-      return "cri";
     if (normalized == "lxc")
       return "lxd";
     if (normalized == "wslc" || normalized == "wslcontainer" || normalized == "wslcontainers")
@@ -280,7 +267,7 @@ namespace {
       const String value = NormalizeBackend(backend);
       if (value == "all")
         return ContainerInfoConfig {};
-      if (value == "docker" || value == "podman" || value == "containerd" || value == "cri" || value == "lxd" || value == "wsl")
+      if (value == "docker" || value == "podman" || value == "lxd" || value == "wsl")
         if (!std::ranges::contains(normalized, value))
           normalized.push_back(value);
     }
@@ -698,297 +685,6 @@ namespace {
     return runtime;
   }
 
-  struct ProtoField {
-    u64    number = 0;
-    u64    wire   = 0;
-    u64    varint = 0;
-    String bytes;
-  };
-
-  auto ReadVarint(StringView input, usize& pos, u64& value) -> bool {
-    value = 0;
-    u32 shift = 0;
-    while (pos < input.size() && shift < 64) {
-      const u8 byte = static_cast<u8>(input[pos++]);
-      value |= static_cast<u64>(byte & 0x7F) << shift;
-      if ((byte & 0x80) == 0)
-        return true;
-      shift += 7;
-    }
-    return false;
-  }
-
-  auto ProtoFields(StringView input) -> Vec<ProtoField> {
-    Vec<ProtoField> fields;
-    usize pos = 0;
-    while (pos < input.size()) {
-      u64 key = 0;
-      if (!ReadVarint(input, pos, key))
-        break;
-      ProtoField field {
-        .number = key >> 3,
-        .wire   = key & 0x7,
-      };
-      if (field.wire == 0) {
-        if (!ReadVarint(input, pos, field.varint))
-          break;
-      } else if (field.wire == 2) {
-        u64 len = 0;
-        if (!ReadVarint(input, pos, len) || pos + len > input.size())
-          break;
-        field.bytes = String(input.substr(pos, static_cast<usize>(len)));
-        pos += static_cast<usize>(len);
-      } else if (field.wire == 5) {
-        pos += 4;
-      } else if (field.wire == 1) {
-        pos += 8;
-      } else {
-        break;
-      }
-      fields.push_back(std::move(field));
-    }
-    return fields;
-  }
-
-  auto ProtoRepeatedMessages(StringView message, u64 fieldNumber) -> Vec<String> {
-    Vec<String> out;
-    for (const ProtoField& field : ProtoFields(message))
-      if (field.number == fieldNumber && field.wire == 2)
-        out.push_back(field.bytes);
-    return out;
-  }
-
-  auto ProtoString(StringView message, u64 fieldNumber) -> String {
-    for (const ProtoField& field : ProtoFields(message))
-      if (field.number == fieldNumber && field.wire == 2)
-        return field.bytes;
-    return {};
-  }
-
-  auto ProtoVarint(StringView message, u64 fieldNumber) -> Option<u64> {
-    for (const ProtoField& field : ProtoFields(message))
-      if (field.number == fieldNumber && field.wire == 0)
-        return field.varint;
-    return None;
-  }
-
-  auto GrpcAddressFromEndpoint(StringView endpoint) -> String {
-    if (HasPrefix(endpoint, "npipe:"))
-      return String(endpoint);
-    if (HasPrefix(endpoint, "unix:"))
-      return String(endpoint);
-    return "unix:" + String(endpoint);
-  }
-
-  auto ByteBufferToString(grpc::ByteBuffer* buffer) -> Result<String> {
-    std::vector<grpc::Slice> slices;
-    const grpc::Status status = buffer->Dump(&slices);
-    if (!status.ok())
-      ERR_FMT(ApiUnavailable, "Failed to read gRPC response: {}", status.error_message());
-
-    String out;
-    for (const grpc::Slice& slice : slices)
-      out.append(reinterpret_cast<const char*>(slice.begin()), slice.size());
-    return out;
-  }
-
-  auto GrpcUnary(StringView endpoint, StringView method, StringView request, const Map<String, String>& metadata = {}) -> Result<String> {
-    grpc::ChannelArguments args;
-    args.SetInt(GRPC_ARG_ENABLE_RETRIES, 0);
-    auto channel = grpc::CreateCustomChannel(GrpcAddressFromEndpoint(endpoint), grpc::InsecureChannelCredentials(), args);
-    grpc::GenericStub stub(channel);
-
-    grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(TOTAL_TIMEOUT_MS));
-    for (const auto& [key, value] : metadata)
-      context.AddMetadata(key, value);
-
-    grpc::Slice slice(request.data(), request.size());
-    grpc::ByteBuffer requestBuffer(&slice, 1);
-    grpc::ByteBuffer responseBuffer;
-    grpc::Status     status;
-    grpc::CompletionQueue cq;
-    const String grpcMethod = String(method);
-    auto rpc = stub.PrepareUnaryCall(&context, grpcMethod, requestBuffer, &cq);
-    if (!rpc)
-      ERR_FMT(ApiUnavailable, "Failed to prepare gRPC call {}", method);
-
-    rpc->StartCall();
-    rpc->Finish(&responseBuffer, &status, reinterpret_cast<void*>(1));
-
-    void* tag = nullptr;
-    bool  ok  = false;
-    if (!cq.Next(&tag, &ok) || !ok || tag != reinterpret_cast<void*>(1))
-      ERR_FMT(ApiUnavailable, "gRPC call {} did not complete", method);
-    cq.Shutdown();
-    if (!status.ok())
-      ERR_FMT(ApiUnavailable, "{}: {}", method, status.error_message());
-
-    return ByteBufferToString(&responseBuffer);
-  }
-
-  auto ContainerdEndpoints() -> Vec<String> {
-    Vec<String> endpoints;
-#ifdef _WIN32
-    endpoints.push_back("npipe:////./pipe/containerd-containerd");
-#else
-    constexpr std::array<StringView, 3> paths {
-      "/run/containerd/containerd.sock",
-      "/var/run/containerd/containerd.sock",
-      "/run/k3s/containerd/containerd.sock",
-    };
-    for (StringView path : paths)
-      if (ExistingSocket(String(path)))
-        endpoints.push_back(String(path));
-#endif
-    return endpoints;
-  }
-
-  auto CriEndpoints() -> Vec<String> {
-    Vec<String> endpoints;
-#ifdef _WIN32
-    endpoints.push_back("npipe:////./pipe/containerd-containerd");
-#else
-    constexpr std::array<StringView, 5> paths {
-      "/run/crio/crio.sock",
-      "/var/run/crio/crio.sock",
-      "/run/containerd/containerd.sock",
-      "/var/run/containerd/containerd.sock",
-      "/run/k3s/containerd/containerd.sock",
-    };
-    for (StringView path : paths)
-      if (ExistingSocket(String(path)))
-        endpoints.push_back(String(path));
-#endif
-    return endpoints;
-  }
-
-  auto CollectContainerd() -> RuntimeInfo {
-    RuntimeInfo runtime {
-      .id          = "containerd",
-      .displayName = "containerd",
-      .kind        = "containerd",
-    };
-
-    const Vec<String> endpoints = ContainerdEndpoints();
-    if (endpoints.empty()) {
-      runtime.error = "No local containerd socket found";
-      return runtime;
-    }
-
-    Vec<String> failures;
-    for (const String& endpoint : endpoints) {
-      runtime.endpoint = endpoint;
-      Result<String> namespacesResponse = GrpcUnary(endpoint, "/containerd.services.namespaces.v1.Namespaces/List", {});
-      if (!namespacesResponse) {
-        failures.push_back(namespacesResponse.error().message);
-        continue;
-      }
-
-      Vec<String> namespaces;
-      for (const String& nsMessage : ProtoRepeatedMessages(*namespacesResponse, 1)) {
-        String name = ProtoString(nsMessage, 1);
-        if (!name.empty())
-          namespaces.push_back(name);
-      }
-      if (namespaces.empty())
-        namespaces.push_back("default");
-
-      std::set<String> containerIds;
-      std::set<String> runningIds;
-      for (const String& ns : namespaces) {
-        const Map<String, String> metadata { { "containerd-namespace", ns } };
-        if (Result<String> containersResponse = GrpcUnary(endpoint, "/containerd.services.containers.v1.Containers/List", {}, metadata); containersResponse) {
-          for (const String& container : ProtoRepeatedMessages(*containersResponse, 1)) {
-            const String id = ProtoString(container, 1);
-            if (!id.empty())
-              containerIds.insert(ns + "/" + id);
-          }
-        }
-
-        if (Result<String> tasksResponse = GrpcUnary(endpoint, "/containerd.services.tasks.v1.Tasks/List", {}, metadata); tasksResponse) {
-          for (const String& task : ProtoRepeatedMessages(*tasksResponse, 1)) {
-            const String id = ProtoString(task, 1);
-            const Option<u64> status = ProtoVarint(task, 3);
-            if (!id.empty() && (!status || *status == 2))
-              runningIds.insert(ns + "/" + id);
-          }
-        }
-      }
-
-      runtime.available = true;
-      runtime.running   = static_cast<u64>(runningIds.size());
-      runtime.total     = static_cast<u64>(containerIds.size());
-      runtime.active    = runtime.running > 0;
-      runtime.error     = None;
-      return runtime;
-    }
-
-    runtime.error = failures.empty() ? Option<String>("No usable containerd endpoint found") : Option<String>(failures.front());
-    return runtime;
-  }
-
-  auto CollectCri() -> RuntimeInfo {
-    RuntimeInfo runtime {
-      .id          = "cri",
-      .displayName = "CRI",
-      .kind        = "cri",
-    };
-
-    const Vec<String> endpoints = CriEndpoints();
-    if (endpoints.empty()) {
-      runtime.error = "No local CRI socket found";
-      return runtime;
-    }
-
-    Vec<String> failures;
-    constexpr std::array<StringView, 2> servicePrefixes {
-      "/runtime.v1.RuntimeService",
-      "/runtime.v1alpha2.RuntimeService",
-    };
-
-    for (const String& endpoint : endpoints) {
-      runtime.endpoint = endpoint;
-
-      for (StringView service : servicePrefixes) {
-        Result<String> status = GrpcUnary(endpoint, String(service) + "/Status", {});
-        if (!status) {
-          failures.push_back(status.error().message);
-          continue;
-        }
-
-        u64 running = 0;
-        u64 total   = 0;
-
-        if (Result<String> containers = GrpcUnary(endpoint, String(service) + "/ListContainers", {}); containers) {
-          for (const String& container : ProtoRepeatedMessages(*containers, 1)) {
-            ++total;
-            if (const Option<u64> state = ProtoVarint(container, 7); state && *state == 1)
-              ++running;
-          }
-        }
-
-        if (Result<String> sandboxes = GrpcUnary(endpoint, String(service) + "/ListPodSandbox", {}); sandboxes) {
-          for (const String& sandbox : ProtoRepeatedMessages(*sandboxes, 1)) {
-            ++total;
-            if (const Option<u64> state = ProtoVarint(sandbox, 6); state && *state == 0)
-              ++running;
-          }
-        }
-
-        runtime.available = true;
-        runtime.running   = running;
-        runtime.total     = total;
-        runtime.active    = running > 0;
-        runtime.error     = None;
-        return runtime;
-      }
-    }
-
-    runtime.error = failures.empty() ? Option<String>("No usable CRI endpoint found") : Option<String>(failures.front());
-    return runtime;
-  }
-
   auto RuntimeFields(const RuntimeInfo& runtime) -> PluginFieldObject {
     return PluginFieldObject {
       { "id", runtime.id },
@@ -1173,10 +869,6 @@ namespace {
       data.runtimes.push_back(CollectDockerLike(RuntimeKind::Podman, "podman", "Podman", PodmanEndpoints()));
     if (BackendEnabled(config, "wsl"))
       data.runtimes.push_back(CollectWslContainers());
-    if (BackendEnabled(config, "containerd"))
-      data.runtimes.push_back(CollectContainerd());
-    if (BackendEnabled(config, "cri"))
-      data.runtimes.push_back(CollectCri());
     if (BackendEnabled(config, "lxd"))
       data.runtimes.push_back(CollectLxd());
 
@@ -1318,23 +1010,6 @@ namespace {
       const auto [running, total] = *ParseLxdInstances(R"json({"metadata":[{"type":"container","status":"Running"},{"type":"virtual-machine","status":"Running"},{"type":"container","status":"Stopped"}]})json");
       assert(running == 1);
       assert(total == 2);
-    }
-
-    {
-      const String containerdTask {
-        '\x0A', '\x05', 'a', 'l', 'p', 'i', 'n', 'e',
-        '\x18', '\x02',
-      };
-      assert(ProtoString(containerdTask, 1) == "alpine");
-      assert(ProtoVarint(containerdTask, 3) == 2);
-    }
-
-    {
-      const String criContainer {
-        '\x3A', '\x00',
-        '\x38', '\x01',
-      };
-      assert(ProtoVarint(criContainer, 7) == 1);
     }
   }
 #endif

@@ -8,16 +8,6 @@
       "name": "libcurl",
       "include_type": "system",
       "static": true
-    },
-    {
-      "name": "grpc++",
-      "include_type": "system",
-      "static": true
-    },
-    {
-      "name": "protobuf",
-      "include_type": "system",
-      "static": true
     }
   ]
 }
