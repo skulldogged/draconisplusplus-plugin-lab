@@ -9,8 +9,8 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
-#include <charconv>
 #include <cctype>
+#include <charconv>
 #include <cstdint>
 #include <cstdlib>
 #include <curl/curl.h>
@@ -18,6 +18,8 @@
 #include <format>
 #include <glaze/glaze.hpp>
 #include <glaze/toml.hpp>
+#include <iterator>
+#include <map>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -36,8 +38,8 @@ using enum DracErrorCode;
   #ifndef WIN32_LEAN_AND_MEAN
     #define WIN32_LEAN_AND_MEAN
   #endif
-  #include <windows.h>
   #include <objbase.h>
+  #include <windows.h>
 #endif
 
 #if DRAC_PRECOMPILED_CONFIG && __has_include("config.hpp")
@@ -47,6 +49,9 @@ using enum DracErrorCode;
   #define CONTAINER_INFO_HAS_PRECOMPILED_CONFIG 0
 #endif
 
+// Field spelling is part of the external Docker, LXD, Podman, and TOML schemas.
+// These DTOs stay named so Glaze can reflect them consistently.
+// NOLINTBEGIN(readability-identifier-naming,misc-use-internal-linkage)
 namespace container_info::dto {
   struct DockerContainer {
     String State;
@@ -86,18 +91,38 @@ namespace container_info::dto {
   struct TomlMainConfig {
     TomlPlugins plugins;
   };
+
+  struct PodmanConnection {
+    String URI;
+    String Identity;
+    bool   IsMachine = false;
+  };
+
+  struct PodmanConnectionConfig {
+    String                             Default;
+    std::map<String, PodmanConnection> Connections;
+  };
+
+  struct PodmanConnectionsFile {
+    PodmanConnectionConfig Connection;
+  };
 } // namespace container_info::dto
+// NOLINTEND(readability-identifier-naming,misc-use-internal-linkage)
 
 namespace {
   namespace dto = container_info::dto;
   namespace fs  = std::filesystem;
 
 #ifdef _WIN32
+  // These declarations mirror the undocumented WSLC COM ABI exactly. Names,
+  // array extents, enum representation, vtable signatures, and GUID layout
+  // must remain binary-compatible with the Windows implementation.
+  // NOLINTBEGIN(readability-identifier-naming,cppcoreguidelines-use-enum-class,performance-enum-size,cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-virtual-class-destructor,modernize-use-trailing-return-type,cppcoreguidelines-special-member-functions)
   namespace wslc_api {
-    constexpr ULONG WSLC_CONTAINER_ID_LENGTH         = 64;
-    constexpr ULONG WSLC_MAX_CONTAINER_NAME_LENGTH  = 255;
-    constexpr ULONG WSLC_MAX_IMAGE_NAME_LENGTH      = 255;
-    constexpr DWORD WSLC_LIST_CONTAINERS_FLAGS_ALL  = 1;
+    constexpr ULONG WSLC_CONTAINER_ID_LENGTH       = 64;
+    constexpr ULONG WSLC_MAX_CONTAINER_NAME_LENGTH = 255;
+    constexpr ULONG WSLC_MAX_IMAGE_NAME_LENGTH     = 255;
+    constexpr DWORD WSLC_LIST_CONTAINERS_FLAGS_ALL = 1;
 
     enum WSLCContainerState {
       WslcContainerStateInvalid = 0,
@@ -146,66 +171,82 @@ namespace {
     };
 
     struct IWSLCSession : IUnknown {
-      virtual HRESULT STDMETHODCALLTYPE GetId(ULONG*)                                                     = 0;
-      virtual HRESULT STDMETHODCALLTYPE GetDisplayName(LPWSTR*)                                           = 0;
-      virtual HRESULT STDMETHODCALLTYPE GetState(void*)                                                   = 0;
-      virtual HRESULT STDMETHODCALLTYPE GetTerminationEvent(HANDLE*)                                      = 0;
-      virtual HRESULT STDMETHODCALLTYPE GetTerminationReason(void*, LPWSTR*)                              = 0;
-      virtual HRESULT STDMETHODCALLTYPE PullImage(LPCSTR, LPCSTR, void*, void*)                           = 0;
-      virtual HRESULT STDMETHODCALLTYPE BuildImage(const void*, void*, HANDLE)                            = 0;
-      virtual HRESULT STDMETHODCALLTYPE LoadImage(void*, ULONGLONG, void*, void*)                         = 0;
-      virtual HRESULT STDMETHODCALLTYPE ImportImage(void*, LPCSTR, ULONGLONG, void*, LPSTR*)              = 0;
-      virtual HRESULT STDMETHODCALLTYPE SaveImage(void*, LPCSTR, void*, HANDLE)                           = 0;
-      virtual HRESULT STDMETHODCALLTYPE SaveImages(void*, const void*, void*, HANDLE)                     = 0;
-      virtual HRESULT STDMETHODCALLTYPE ListImages(const void*, void*, ULONG*)                            = 0;
-      virtual HRESULT STDMETHODCALLTYPE DeleteImage(const void*, void*, ULONG*)                           = 0;
-      virtual HRESULT STDMETHODCALLTYPE TagImage(const void*)                                             = 0;
-      virtual HRESULT STDMETHODCALLTYPE InspectImage(LPCSTR, LPSTR*)                                     = 0;
-      virtual HRESULT STDMETHODCALLTYPE PruneImages(const void*, ULONG, void*, ULONG*, ULONGLONG*)        = 0;
-      virtual HRESULT STDMETHODCALLTYPE CreateContainer(const void*, void*, void**)                       = 0;
-      virtual HRESULT STDMETHODCALLTYPE OpenContainer(LPCSTR, void**)                                    = 0;
+      virtual HRESULT STDMETHODCALLTYPE GetId(ULONG*)                                              = 0;
+      virtual HRESULT STDMETHODCALLTYPE GetDisplayName(LPWSTR*)                                    = 0;
+      virtual HRESULT STDMETHODCALLTYPE GetState(void*)                                            = 0;
+      virtual HRESULT STDMETHODCALLTYPE GetTerminationEvent(HANDLE*)                               = 0;
+      virtual HRESULT STDMETHODCALLTYPE GetTerminationReason(void*, LPWSTR*)                       = 0;
+      virtual HRESULT STDMETHODCALLTYPE PullImage(LPCSTR, LPCSTR, void*, void*)                    = 0;
+      virtual HRESULT STDMETHODCALLTYPE BuildImage(const void*, void*, HANDLE)                     = 0;
+      virtual HRESULT STDMETHODCALLTYPE LoadImage(void*, ULONGLONG, void*, void*)                  = 0;
+      virtual HRESULT STDMETHODCALLTYPE ImportImage(void*, LPCSTR, ULONGLONG, void*, LPSTR*)       = 0;
+      virtual HRESULT STDMETHODCALLTYPE SaveImage(void*, LPCSTR, void*, HANDLE)                    = 0;
+      virtual HRESULT STDMETHODCALLTYPE SaveImages(void*, const void*, void*, HANDLE)              = 0;
+      virtual HRESULT STDMETHODCALLTYPE ListImages(const void*, void*, ULONG*)                     = 0;
+      virtual HRESULT STDMETHODCALLTYPE DeleteImage(const void*, void*, ULONG*)                    = 0;
+      virtual HRESULT STDMETHODCALLTYPE TagImage(const void*)                                      = 0;
+      virtual HRESULT STDMETHODCALLTYPE InspectImage(LPCSTR, LPSTR*)                               = 0;
+      virtual HRESULT STDMETHODCALLTYPE PruneImages(const void*, ULONG, void*, ULONG*, ULONGLONG*) = 0;
+      virtual HRESULT STDMETHODCALLTYPE CreateContainer(const void*, void*, void**)                = 0;
+      virtual HRESULT STDMETHODCALLTYPE OpenContainer(LPCSTR, void**)                              = 0;
       virtual HRESULT STDMETHODCALLTYPE ListContainers(
-        const WSLCListContainersOptions*, WSLCContainerEntry**, ULONG*, WSLCContainerPortMapping**, ULONG*) = 0;
+        const WSLCListContainersOptions*,
+        WSLCContainerEntry**,
+        ULONG*,
+        WSLCContainerPortMapping**,
+        ULONG*
+      ) = 0;
     };
 
     struct IWSLCSessionManager : IUnknown {
-      virtual HRESULT STDMETHODCALLTYPE GetVersion(WSLCVersion*)                                         = 0;
-      virtual HRESULT STDMETHODCALLTYPE CreateSession(const void*, DWORD, void*, IWSLCSession**)         = 0;
-      virtual HRESULT STDMETHODCALLTYPE EnterSession(LPCWSTR, LPCWSTR, void*, IWSLCSession**)           = 0;
-      virtual HRESULT STDMETHODCALLTYPE ListSessions(WSLCSessionListEntry**, ULONG*)                     = 0;
-      virtual HRESULT STDMETHODCALLTYPE OpenSession(ULONG, IWSLCSession**)                               = 0;
-      virtual HRESULT STDMETHODCALLTYPE OpenSessionByName(LPCWSTR, IWSLCSession**)                       = 0;
+      virtual HRESULT STDMETHODCALLTYPE GetVersion(WSLCVersion*)                                 = 0;
+      virtual HRESULT STDMETHODCALLTYPE CreateSession(const void*, DWORD, void*, IWSLCSession**) = 0;
+      virtual HRESULT STDMETHODCALLTYPE EnterSession(LPCWSTR, LPCWSTR, void*, IWSLCSession**)    = 0;
+      virtual HRESULT STDMETHODCALLTYPE ListSessions(WSLCSessionListEntry**, ULONG*)             = 0;
+      virtual HRESULT STDMETHODCALLTYPE OpenSession(ULONG, IWSLCSession**)                       = 0;
+      virtual HRESULT STDMETHODCALLTYPE OpenSessionByName(LPCWSTR, IWSLCSession**)               = 0;
     };
 
     inline constexpr GUID CLSID_WSLCSessionManager {
-      0xa9b7a1b9, 0x0671, 0x405c, { 0x95, 0xf1, 0xe0, 0x61, 0x2c, 0xb4, 0xce, 0x8f }
+      .Data1 = 0xa9b7a1b9,
+      .Data2 = 0x0671,
+      .Data3 = 0x405c,
+      .Data4 = { 0x95, 0xf1, 0xe0, 0x61, 0x2c, 0xb4, 0xce, 0x8f }
     };
 
     inline constexpr GUID IID_IWSLCSessionManager {
-      0x82a7abc8, 0x6b50, 0x43fc, { 0xab, 0x96, 0x15, 0xfb, 0xbe, 0x7e, 0x87, 0x60 }
+      .Data1 = 0x82a7abc8,
+      .Data2 = 0x6b50,
+      .Data3 = 0x43fc,
+      .Data4 = { 0xab, 0x96, 0x15, 0xfb, 0xbe, 0x7e, 0x87, 0x60 }
     };
   } // namespace wslc_api
+  // NOLINTEND(readability-identifier-naming,cppcoreguidelines-use-enum-class,performance-enum-size,cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-virtual-class-destructor,modernize-use-trailing-return-type,cppcoreguidelines-special-member-functions)
 #endif
 
   constexpr long CONNECT_TIMEOUT_MS = 350;
   constexpr long TOTAL_TIMEOUT_MS   = 900;
 
-  enum class RuntimeKind {
+  enum class RuntimeKind : u8 {
     Docker,
     Podman,
   };
 
   struct RuntimeInfo {
-    String      id;
-    String      displayName;
-    String      kind;
-    bool        available = false;
-    bool        active    = false;
-    u64         running   = 0;
-    u64         total     = 0;
-    String      version;
-    String      endpoint;
+    String         id;
+    String         displayName;
+    String         kind;
+    bool           available  = false;
+    bool           configured = false;
+    bool           active     = false;
+    u64            running    = 0;
+    u64            total      = 0;
+    String         version;
+    String         endpoint;
     Option<String> error = None;
+
+    RuntimeInfo(String runtimeId, String displayName, String kind)
+      : id(std::move(runtimeId)), displayName(std::move(displayName)), kind(std::move(kind)) {}
   };
 
   struct ContainerInfoData {
@@ -217,29 +258,34 @@ namespace {
 
   struct ContainerInfoConfig {
     Vec<String> backends {
+#ifdef _WIN32
+      "docker",
+      "podman",
+      "wsl",
+#else
       "docker",
       "podman",
       "lxd",
-      "wsl",
+#endif
     };
   };
 
   auto HasPrefix(StringView value, StringView prefix) -> bool {
-    return value.size() >= prefix.size() && value.substr(0, prefix.size()) == prefix;
+    return value.size() >= prefix.size() && value.starts_with(prefix);
   }
 
   auto ToLower(StringView value) -> String {
     String result(value);
-    std::ranges::transform(result, result.begin(), [](unsigned char ch) {
-      return static_cast<char>(std::tolower(ch));
+    std::ranges::transform(result, result.begin(), [](unsigned char character) -> char {
+      return static_cast<char>(std::tolower(character));
     });
     return result;
   }
 
   auto NormalizeBackend(StringView backend) -> String {
     String normalized = ToLower(backend);
-    std::erase_if(normalized, [](unsigned char ch) {
-      return std::isspace(ch) || ch == '_' || ch == '-';
+    std::erase_if(normalized, [](unsigned char character) -> bool {
+      return std::isspace(character) || character == '_' || character == '-';
     });
     if (normalized == "dockerengine")
       return "docker";
@@ -252,7 +298,7 @@ namespace {
 
   auto BackendEnabled(const ContainerInfoConfig& config, StringView backend) -> bool {
     const String normalizedBackend = NormalizeBackend(backend);
-    return std::ranges::any_of(config.backends, [&normalizedBackend](StringView configured) {
+    return std::ranges::any_of(config.backends, [&normalizedBackend](StringView configured) -> bool {
       return NormalizeBackend(configured) == normalizedBackend;
     });
   }
@@ -263,7 +309,7 @@ namespace {
       config.backends = tomlCfg.backends;
 
     Vec<String> normalized;
-    for (StringView backend : config.backends) {
+    for (const StringView backend : config.backends) {
       const String value = NormalizeBackend(backend);
       if (value == "all")
         return ContainerInfoConfig {};
@@ -276,7 +322,7 @@ namespace {
     return config;
   }
 
-  auto LoadConfigFromToml(StringView tomlConfig, StringView sourceName) -> Result<ContainerInfoConfig> {
+  [[maybe_unused]] auto LoadConfigFromToml(StringView tomlConfig, StringView sourceName) -> Result<ContainerInfoConfig> {
     dto::TomlConfig tomlCfg;
     String          buffer(tomlConfig);
     glz::context    ctx {};
@@ -299,7 +345,7 @@ namespace {
 #endif
   }
 
-  auto LoadConfigFromFilesystem(const fs::path& configDir) -> Result<ContainerInfoConfig> {
+  [[maybe_unused]] auto LoadConfigFromFilesystem(const fs::path& configDir) -> Result<ContainerInfoConfig> {
     const fs::path pluginConfigPath = configDir / "container_info.toml";
     if (fs::exists(pluginConfigPath)) {
       String       buffer;
@@ -334,7 +380,7 @@ namespace {
   }
 
   auto ParseDockerContainers(StringView body) -> Result<Pair<u64, u64>> {
-    const String buffer(body);
+    const String              buffer(body);
     Vec<dto::DockerContainer> containers;
     if (auto errc = glz::read<glz::opts { .error_on_unknown_keys = false }>(containers, buffer); errc.ec != glz::error_code::none)
       ERR_FMT(ParseError, "Failed to parse Docker-compatible containers response: {}", glz::format_error(errc, buffer));
@@ -351,7 +397,7 @@ namespace {
   }
 
   auto ParseDockerVersion(StringView body) -> String {
-    const String buffer(body);
+    const String       buffer(body);
     dto::DockerVersion version;
     if (auto errc = glz::read<glz::opts { .error_on_unknown_keys = false }>(version, buffer); errc.ec != glz::error_code::none)
       return {};
@@ -359,7 +405,7 @@ namespace {
   }
 
   auto ParseLxdInstances(StringView body) -> Result<Pair<u64, u64>> {
-    const String buffer(body);
+    const String              buffer(body);
     dto::LxdInstancesResponse response;
     if (auto errc = glz::read<glz::opts { .error_on_unknown_keys = false }>(response, buffer); errc.ec != glz::error_code::none)
       ERR_FMT(ParseError, "Failed to parse LXD instances response: {}", glz::format_error(errc, buffer));
@@ -379,7 +425,7 @@ namespace {
   }
 
   auto ParseLxdVersion(StringView body) -> String {
-    const String buffer(body);
+    const String         buffer(body);
     dto::LxdInfoResponse response;
     if (auto errc = glz::read<glz::opts { .error_on_unknown_keys = false }>(response, buffer); errc.ec != glz::error_code::none)
       return {};
@@ -397,6 +443,7 @@ namespace {
     String urlBase;
     String unixSocket;
     String namedPipe;
+    bool   configured = false;
   };
 
   class CurlGlobal {
@@ -407,6 +454,11 @@ namespace {
     ~CurlGlobal() {
       curl_global_cleanup();
     }
+
+    CurlGlobal(const CurlGlobal&)                    = delete;
+    CurlGlobal(CurlGlobal&&)                         = delete;
+    auto operator=(const CurlGlobal&) -> CurlGlobal& = delete;
+    auto operator=(CurlGlobal&&) -> CurlGlobal&      = delete;
   };
 
   auto CurlWriteCallback(char* ptr, usize size, usize nmemb, void* userdata) -> usize {
@@ -420,7 +472,7 @@ namespace {
     if (curl == nullptr)
       ERR(ApiUnavailable, "curl_easy_init() failed");
 
-    String body;
+    String       body;
     const String url = endpoint.urlBase + String(path);
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteCallback);
@@ -445,55 +497,183 @@ namespace {
   }
 
 #ifdef _WIN32
+  auto EnvValue(const char* name) -> Option<String> {
+    char* value = nullptr;
+    usize size  = 0;
+    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr)
+      return None;
+    String result(value);
+    std::free(value); // NOLINT(cppcoreguidelines-no-malloc): _dupenv_s requires free().
+    return result;
+  }
+
   auto WideFromUtf8(StringView value) -> std::wstring {
     if (value.empty())
       return {};
-    const int needed = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    const int    needed = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
     std::wstring out(static_cast<usize>(needed), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), out.data(), needed);
     return out;
   }
 
+  auto DecodeChunkedHttpBody(StringView body) -> Result<String> {
+    String decoded;
+    usize  pos = 0;
+
+    for (;;) {
+      const usize lineEnd = body.find("\r\n", pos);
+      if (lineEnd == StringView::npos)
+        ERR(ParseError, "Chunked HTTP response ended before chunk size");
+
+      StringView sizeText = body.substr(pos, lineEnd - pos);
+      if (const usize extension = sizeText.find(';'); extension != StringView::npos)
+        sizeText = sizeText.substr(0, extension);
+      while (!sizeText.empty() && std::isspace(static_cast<unsigned char>(sizeText.front())))
+        sizeText.remove_prefix(1);
+      while (!sizeText.empty() && std::isspace(static_cast<unsigned char>(sizeText.back())))
+        sizeText.remove_suffix(1);
+      if (sizeText.empty())
+        ERR(ParseError, "Chunked HTTP response contained an empty chunk size");
+
+      usize       chunkSize = 0;
+      const char* sizeEnd   = sizeText.data() + sizeText.size();                        // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic): from_chars requires a pointer pair.
+      const auto [ptr, ec]  = std::from_chars(sizeText.data(), sizeEnd, chunkSize, 16); // NOLINT(bugprone-suspicious-stringview-data-usage): from_chars consumes the explicit bounded range.
+      if (ec != std::errc {} || ptr != sizeEnd)
+        ERR(ParseError, "Chunked HTTP response contained an invalid chunk size");
+
+      pos = lineEnd + 2;
+      if (chunkSize == 0)
+        return decoded;
+      if (body.size() - pos < chunkSize)
+        ERR(ParseError, "Chunked HTTP response ended before chunk data");
+
+      decoded.append(body.substr(pos, chunkSize));
+      pos += chunkSize;
+      if (body.size() - pos < 2 || body.substr(pos, 2) != "\r\n")
+        ERR(ParseError, "Chunked HTTP response chunk was not CRLF terminated");
+      pos += 2;
+    }
+  }
+
+  auto ParseRawHttpResponse(const String& raw, StringView display) -> Result<HttpResponse> {
+    const usize headerEnd = raw.find("\r\n\r\n");
+    if (headerEnd == String::npos)
+      ERR(ParseError, "HTTP response did not contain headers");
+
+    const StringView headers    = StringView(raw).substr(0, headerEnd);
+    const StringView statusLine = headers.substr(0, headers.find("\r\n"));
+    long             status     = 0;
+    if (statusLine.size() >= 12) {
+      const StringView statusCode = statusLine.substr(9, 3);
+      const char*      statusEnd  = statusCode.data() + statusCode.size(); // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic): from_chars requires a pointer pair.
+      std::from_chars(statusCode.data(), statusEnd, status);               // NOLINT(bugprone-suspicious-stringview-data-usage): from_chars consumes the explicit bounded range.
+    }
+
+    if (status >= 400)
+      ERR_FMT(ApiUnavailable, "{} returned HTTP {}", display, status);
+
+    String       body         = raw.substr(headerEnd + 4);
+    const String lowerHeaders = ToLower(headers);
+    if (lowerHeaders.contains("transfer-encoding:") && lowerHeaders.contains("chunked"))
+      body = TRY(DecodeChunkedHttpBody(body));
+
+    return HttpResponse {
+      .status = status,
+      .body   = std::move(body),
+    };
+  }
+
+  auto BuildHttpGetRequest(StringView path) -> String {
+    constexpr StringView prefix = "GET ";
+    constexpr StringView suffix = " HTTP/1.1\r\nHost: localhost\r\nUser-Agent: draconisplusplus-container-info/1\r\nConnection: close\r\n\r\n";
+
+    String request;
+    request.reserve(prefix.size() + path.size() + suffix.size());
+    request += prefix;
+    request += path;
+    request += suffix;
+    return request;
+  }
+
   auto HttpGetNamedPipe(const HttpEndpoint& endpoint, StringView path) -> Result<HttpResponse> {
-    const std::wstring pipe = WideFromUtf8(endpoint.namedPipe);
-    HANDLE handle = CreateFileW(pipe.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    const std::wstring pipe   = WideFromUtf8(endpoint.namedPipe);
+    HANDLE             handle = CreateFileW(pipe.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
     if (handle == INVALID_HANDLE_VALUE)
       ERR_FMT(ApiUnavailable, "{} pipe unavailable: {}", endpoint.display, static_cast<unsigned long>(GetLastError()));
 
     DWORD mode = PIPE_READMODE_BYTE;
     SetNamedPipeHandleState(handle, &mode, nullptr, nullptr);
 
-    const String request = std::format("GET {} HTTP/1.1\r\nHost: localhost\r\nUser-Agent: draconisplusplus-container-info/1\r\nConnection: close\r\n\r\n", path);
-    DWORD written = 0;
+    const String request = BuildHttpGetRequest(path);
+    DWORD        written = 0;
     if (!WriteFile(handle, request.data(), static_cast<DWORD>(request.size()), &written, nullptr)) {
       const DWORD err = GetLastError();
       CloseHandle(handle);
       ERR_FMT(IoError, "{} pipe write failed: {}", endpoint.display, static_cast<unsigned long>(err));
     }
 
-    String raw;
+    String                 raw;
     std::array<char, 4096> buffer {};
-    DWORD read = 0;
+    DWORD                  read = 0;
     while (ReadFile(handle, buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr) && read > 0)
       raw.append(buffer.data(), read);
     CloseHandle(handle);
 
-    const usize headerEnd = raw.find("\r\n\r\n");
-    if (headerEnd == String::npos)
-      ERR(ParseError, "Named-pipe HTTP response did not contain headers");
+    return ParseRawHttpResponse(raw, endpoint.display);
+  }
 
-    const StringView statusLine = StringView(raw).substr(0, raw.find("\r\n"));
-    long status = 0;
-    if (statusLine.size() >= 12)
-      std::from_chars(statusLine.data() + 9, statusLine.data() + 12, status);
+  auto PodmanConnectionFilePath() -> fs::path {
+    if (Option<String> appData = EnvValue("APPDATA"))
+      return fs::path(*appData) / "containers" / "podman-connections.json";
+    return {};
+  }
 
-    if (status >= 400)
-      ERR_FMT(ApiUnavailable, "{} returned HTTP {}", endpoint.display, status);
+  auto EndpointFromPodmanUri(StringView uri, StringView endpointId, bool configured = false) -> Option<HttpEndpoint> {
+    if (HasPrefix(uri, "npipe://")) {
+      String pipe(uri.substr(8));
+      std::ranges::replace(pipe, '/', '\\');
+      if (HasPrefix(pipe, R"(.\pipe\)"))
+        pipe = R"(\\)" + pipe;
+      if (HasPrefix(pipe, R"(\\.\pipe\)"))
+        return HttpEndpoint { .id = String(endpointId), .display = "Podman", .urlBase = "http://d", .unixSocket = {}, .namedPipe = std::move(pipe), .configured = configured };
+    }
 
-    return HttpResponse {
-      .status = status,
-      .body   = raw.substr(headerEnd + 4),
+    return None;
+  }
+
+  auto PodmanConnectionEndpoints() -> Vec<HttpEndpoint> {
+    Vec<HttpEndpoint> endpoints;
+    const fs::path    path = PodmanConnectionFilePath();
+    if (path.empty() || !fs::exists(path))
+      return endpoints;
+
+    String       buffer;
+    glz::context ctx {};
+    ctx.current_file = path.string();
+    if (const auto fileError = glz::file_to_buffer(buffer, ctx.current_file); bool(fileError))
+      return endpoints;
+
+    dto::PodmanConnectionsFile connections;
+    if (const auto readError = glz::read<glz::opts { .error_on_unknown_keys = false }>(connections, buffer, ctx); readError)
+      return endpoints;
+
+    auto addEndpoint = [&endpoints](StringView name, const dto::PodmanConnection& connection) -> void {
+      if (Option<HttpEndpoint> endpoint = EndpointFromPodmanUri(connection.URI, std::format("podman:{}", name), true))
+        endpoints.push_back(std::move(*endpoint));
     };
+
+    if (!connections.Connection.Default.empty()) {
+      if (const auto iter = connections.Connection.Connections.find(connections.Connection.Default); iter != connections.Connection.Connections.end()) {
+        addEndpoint(iter->first, iter->second);
+        return endpoints;
+      }
+    }
+
+    for (const auto& [name, connection] : connections.Connection.Connections)
+      if (name != connections.Connection.Default)
+        addEndpoint(name, connection);
+
+    return endpoints;
   }
 #endif
 
@@ -505,22 +685,27 @@ namespace {
     return HttpGetCurl(endpoint, path);
   }
 
+  auto EndpointLabel(const HttpEndpoint& endpoint) -> String {
+    if (!endpoint.unixSocket.empty())
+      return endpoint.unixSocket;
+    if (!endpoint.namedPipe.empty())
+      return endpoint.namedPipe;
+    return endpoint.urlBase;
+  }
+
+#ifndef _WIN32
   auto ExistingSocket(String path) -> Option<String> {
-#ifdef _WIN32
-    (void)path;
-    return None;
-#else
     std::error_code ec;
     if (std::filesystem::exists(path, ec))
       return path;
     return None;
-#endif
   }
+#endif
 
   auto DockerEndpoints() -> Vec<HttpEndpoint> {
     Vec<HttpEndpoint> endpoints;
 #ifdef _WIN32
-    endpoints.push_back({ .id = "docker-npipe", .display = "Docker Engine", .urlBase = "http://localhost", .namedPipe = R"(\\.\pipe\docker_engine)" });
+    endpoints.push_back({ .id = "docker-npipe", .display = "Docker Engine", .urlBase = "http://localhost", .unixSocket = {}, .namedPipe = R"(\\.\pipe\docker_engine)" });
 #else
     constexpr std::array<StringView, 7> paths {
       "/var/run/docker.sock",
@@ -547,6 +732,16 @@ namespace {
   auto PodmanEndpoints() -> Vec<HttpEndpoint> {
     Vec<HttpEndpoint> endpoints;
 #ifdef _WIN32
+    Vec<HttpEndpoint> configured = PodmanConnectionEndpoints();
+    endpoints.insert(endpoints.end(), std::make_move_iterator(configured.begin()), std::make_move_iterator(configured.end()));
+    if (!endpoints.empty())
+      return endpoints;
+
+    if (Option<String> containerHost = EnvValue("CONTAINER_HOST"))
+      if (Option<HttpEndpoint> endpoint = EndpointFromPodmanUri(*containerHost, "podman:CONTAINER_HOST", true))
+        endpoints.push_back(std::move(*endpoint));
+
+    endpoints.push_back({ .id = "podman-npipe", .display = "Podman", .urlBase = "http://d", .unixSocket = {}, .namedPipe = R"(\\.\pipe\podman-machine-default)" });
     return endpoints;
 #else
     constexpr std::array<StringView, 3> paths {
@@ -584,56 +779,60 @@ namespace {
 #endif
   }
 
-  auto CollectDockerLike(RuntimeKind kind, StringView id, StringView display, Vec<HttpEndpoint> endpoints) -> RuntimeInfo {
-    RuntimeInfo runtime {
-      .id          = String(id),
-      .displayName = String(display),
-      .kind        = kind == RuntimeKind::Docker ? "docker" : "podman",
-    };
+  template <typename GetHttp>
+  auto CollectDockerLikeEndpointWith(RuntimeKind kind, RuntimeInfo& runtime, GetHttp getHttp) -> Result<Unit> {
+    Result<HttpResponse> containersResult = getHttp("/containers/json?all=true");
+    if (!containersResult)
+      return Err(containersResult.error());
+    const HttpResponse containersResponse = std::move(*containersResult);
+
+    Result<Pair<u64, u64>> countsResult = ParseDockerContainers(containersResponse.body);
+    if (!countsResult)
+      return Err(countsResult.error());
+    Pair<u64, u64> counts = *countsResult;
+
+    if (Result<HttpResponse> versionResponse = getHttp(kind == RuntimeKind::Podman ? "/libpod/version" : "/version"); versionResponse) {
+      runtime.version = ParseDockerVersion(versionResponse->body);
+    } else if (kind == RuntimeKind::Podman) {
+      if (Result<HttpResponse> fallbackVersionResponse = getHttp("/version"); fallbackVersionResponse)
+        runtime.version = ParseDockerVersion(fallbackVersionResponse->body);
+    }
+
+    const auto [running, total] = counts;
+    runtime.available           = true;
+    runtime.running             = running;
+    runtime.total               = total;
+    runtime.active              = running > 0;
+    runtime.error               = None;
+    return {};
+  }
+
+  auto CollectDockerLikeEndpoint(RuntimeKind kind, RuntimeInfo& runtime, const HttpEndpoint& endpoint) -> Result<Unit> {
+    runtime.endpoint = EndpointLabel(endpoint);
+
+    return CollectDockerLikeEndpointWith(kind, runtime, [&endpoint](StringView path) -> Result<HttpResponse> {
+      return HttpGet(endpoint, path);
+    });
+  }
+
+  auto CollectDockerLike(RuntimeKind kind, StringView runtimeId, StringView display, Vec<HttpEndpoint> endpoints) -> RuntimeInfo {
+    RuntimeInfo runtime(String(runtimeId), String(display), kind == RuntimeKind::Docker ? "docker" : "podman");
 
     if (endpoints.empty()) {
       runtime.error = "No local API socket or named pipe found";
       return runtime;
     }
 
+    runtime.configured = std::ranges::any_of(endpoints, [](const HttpEndpoint& endpoint) -> bool {
+      return endpoint.configured;
+    });
+
     Vec<String> failures;
     for (const HttpEndpoint& endpoint : endpoints) {
-      runtime.endpoint = !endpoint.unixSocket.empty() ? endpoint.unixSocket : endpoint.namedPipe;
-
-      Result<HttpResponse> ping = HttpGet(endpoint, "/_ping");
-      if (!ping) {
-        failures.push_back(ping.error().message);
-        continue;
-      }
-
-      Result<HttpResponse> versionResponse = HttpGet(endpoint, kind == RuntimeKind::Podman ? "/libpod/version" : "/version");
-      if (versionResponse) {
-        runtime.version = ParseDockerVersion(versionResponse->body);
-      } else if (kind == RuntimeKind::Podman) {
-        Result<HttpResponse> fallbackVersionResponse = HttpGet(endpoint, "/version");
-        if (fallbackVersionResponse)
-          runtime.version = ParseDockerVersion(fallbackVersionResponse->body);
-      }
-
-      Result<HttpResponse> containersResponse = HttpGet(endpoint, "/containers/json?all=true");
-      if (!containersResponse) {
-        failures.push_back(containersResponse.error().message);
-        continue;
-      }
-
-      Result<Pair<u64, u64>> counts = ParseDockerContainers(containersResponse->body);
-      if (!counts) {
-        failures.push_back(counts.error().message);
-        continue;
-      }
-
-      const auto [running, total] = *counts;
-      runtime.available = true;
-      runtime.running   = running;
-      runtime.total     = total;
-      runtime.active    = running > 0;
-      runtime.error     = None;
-      return runtime;
+      Result<Unit> collected = CollectDockerLikeEndpoint(kind, runtime, endpoint);
+      if (collected)
+        return runtime;
+      failures.push_back(collected.error().message);
     }
 
     runtime.error = failures.empty() ? Option<String>("No usable endpoint found") : Option<String>(failures.front());
@@ -641,11 +840,7 @@ namespace {
   }
 
   auto CollectLxd() -> RuntimeInfo {
-    RuntimeInfo runtime {
-      .id          = "lxd",
-      .displayName = "LXD",
-      .kind        = "lxd",
-    };
+    RuntimeInfo runtime("lxd", "LXD", "lxd");
 
     const Vec<HttpEndpoint> endpoints = LxdEndpoints();
     if (endpoints.empty()) {
@@ -673,11 +868,11 @@ namespace {
       }
 
       const auto [running, total] = *counts;
-      runtime.available = true;
-      runtime.running   = running;
-      runtime.total     = total;
-      runtime.active    = running > 0;
-      runtime.error     = None;
+      runtime.available           = true;
+      runtime.running             = running;
+      runtime.total               = total;
+      runtime.active              = running > 0;
+      runtime.error               = None;
       return runtime;
     }
 
@@ -686,22 +881,25 @@ namespace {
   }
 
   auto RuntimeFields(const RuntimeInfo& runtime) -> PluginFieldObject {
-    return PluginFieldObject {
-      { "id", runtime.id },
+    PluginFieldObject fields {
+      {           "id",          runtime.id },
       { "display_name", runtime.displayName },
-      { "kind", runtime.kind },
-      { "available", runtime.available },
-      { "active", runtime.active },
-      { "running", runtime.running },
-      { "total", runtime.total },
-      { "version", runtime.version },
-      { "endpoint", runtime.endpoint },
+      {         "kind",        runtime.kind },
+      {    "available",   runtime.available },
+      {       "active",      runtime.active },
+      {      "running",     runtime.running },
+      {        "total",       runtime.total },
+      {      "version",     runtime.version },
+      {     "endpoint",    runtime.endpoint },
     };
+    if (runtime.error)
+      fields.emplace("error", *runtime.error);
+    return fields;
   }
 
 #ifdef _WIN32
-  auto HResultString(HRESULT hr) -> String {
-    return std::format("0x{:08X}", static_cast<unsigned int>(static_cast<std::uint32_t>(hr)));
+  auto HResultString(HRESULT result) -> String {
+    return std::format("0x{:08X}", static_cast<unsigned int>(static_cast<std::uint32_t>(result)));
   }
 
   void ReleaseUnknown(IUnknown* unknown) {
@@ -721,23 +919,21 @@ namespace {
       RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
       RPC_C_IMP_LEVEL_IMPERSONATE,
       nullptr,
-      EOAC_NONE);
+      EOAC_NONE
+    );
   }
 #endif
 
   auto CollectWslContainers() -> RuntimeInfo {
-    RuntimeInfo runtime {
-      .id          = "wsl",
-      .displayName = "WSL Containers",
-      .kind        = "wsl",
-    };
+    RuntimeInfo runtime("wsl", "WSL Containers", "wsl");
 
 #ifdef _WIN32
-    runtime.endpoint = "WSLCSessionManager";
-    HMODULE sdk = LoadLibraryW(L"wslcsdk.dll");
+    runtime.endpoint       = "WSLCSessionManager";
+    HMODULE sdk            = LoadLibraryW(L"wslcsdk.dll");
     using WslcGetVersionFn = HRESULT(WINAPI*)(wslc_api::WSLCVersion*);
     if (sdk != nullptr) {
-      auto* getVersionProc = reinterpret_cast<WslcGetVersionFn>(GetProcAddress(sdk, "WslcGetVersion"));
+      // GetProcAddress exposes an untyped address by Win32 API design.
+      auto* getVersionProc = reinterpret_cast<WslcGetVersionFn>(GetProcAddress(sdk, "WslcGetVersion")); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
       if (getVersionProc != nullptr) {
         wslc_api::WSLCVersion version {};
         if (SUCCEEDED(getVersionProc(&version)))
@@ -746,25 +942,27 @@ namespace {
       FreeLibrary(sdk);
     }
 
-    const HRESULT initHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const HRESULT initHr    = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool    uninitCom = SUCCEEDED(initHr);
     if (FAILED(initHr) && initHr != RPC_E_CHANGED_MODE) {
       runtime.error = std::format("Failed to initialize COM for WSL Containers: {}", HResultString(initHr));
       return runtime;
     }
 
-    wslc_api::IWSLCSessionManager* manager = nullptr;
-    HRESULT hr = CoCreateInstance(
+    wslc_api::IWSLCSessionManager* manager    = nullptr;
+    auto**                         managerOut = reinterpret_cast<void**>(&manager); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast): COM out parameter ABI.
+    HRESULT                        result     = CoCreateInstance(
       wslc_api::CLSID_WSLCSessionManager,
       nullptr,
       CLSCTX_LOCAL_SERVER,
       wslc_api::IID_IWSLCSessionManager,
-      reinterpret_cast<void**>(&manager));
-    if (FAILED(hr)) {
+      managerOut
+    );
+    if (FAILED(result)) {
       if (uninitCom)
         CoUninitialize();
-      runtime.error = (hr == REGDB_E_CLASSNOTREG) ? Option<String>("No local WSL container API found")
-                                                  : Option<String>(std::format("Failed to open WSL container service: {}", HResultString(hr)));
+      runtime.error = (result == REGDB_E_CLASSNOTREG) ? Option<String>("No local WSL container API found")
+                                                      : Option<String>(std::format("Failed to open WSL container service: {}", HResultString(result)));
       return runtime;
     }
 
@@ -775,44 +973,44 @@ namespace {
         runtime.version = std::format("{}.{}.{}", version.Major, version.Minor, version.Revision);
     }
 
-    wslc_api::WSLCSessionListEntry* sessions = nullptr;
-    ULONG                          sessionCount = 0;
-    hr = manager->ListSessions(&sessions, &sessionCount);
-    if (FAILED(hr)) {
+    wslc_api::WSLCSessionListEntry* sessions     = nullptr;
+    ULONG                           sessionCount = 0;
+    result                                       = manager->ListSessions(&sessions, &sessionCount);
+    if (FAILED(result)) {
       ReleaseUnknown(manager);
       if (uninitCom)
         CoUninitialize();
-      runtime.error = std::format("Failed to list WSL container sessions: {}", HResultString(hr));
+      runtime.error = std::format("Failed to list WSL container sessions: {}", HResultString(result));
       return runtime;
     }
 
     runtime.available = true;
 
-    for (ULONG i = 0; i < sessionCount; ++i) {
+    for (const wslc_api::WSLCSessionListEntry& sessionEntry : Span(sessions, sessionCount)) {
       wslc_api::IWSLCSession* session = nullptr;
-      hr = manager->OpenSession(sessions[i].SessionId, &session);
-      if (FAILED(hr))
+      result                          = manager->OpenSession(sessionEntry.SessionId, &session);
+      if (FAILED(result))
         continue;
 
       ConfigureComProxy(session);
-      wslc_api::WSLCListContainersOptions options {
+      const wslc_api::WSLCListContainersOptions options {
         .Flags        = wslc_api::WSLC_LIST_CONTAINERS_FLAGS_ALL,
         .Limit        = -1,
         .Filters      = nullptr,
         .FiltersCount = 0,
       };
-      wslc_api::WSLCContainerEntry*        containers = nullptr;
+      wslc_api::WSLCContainerEntry*       containers     = nullptr;
       ULONG                               containerCount = 0;
-      wslc_api::WSLCContainerPortMapping* ports = nullptr;
-      ULONG                               portsCount = 0;
-      hr = session->ListContainers(&options, &containers, &containerCount, &ports, &portsCount);
-      if (SUCCEEDED(hr)) {
+      wslc_api::WSLCContainerPortMapping* ports          = nullptr;
+      ULONG                               portsCount     = 0;
+      result                                             = session->ListContainers(&options, &containers, &containerCount, &ports, &portsCount);
+      if (SUCCEEDED(result)) {
         runtime.total += containerCount;
-        for (ULONG n = 0; n < containerCount; ++n)
-          if (containers[n].State == wslc_api::WslcContainerStateRunning)
+        for (const wslc_api::WSLCContainerEntry& container : Span(containers, containerCount))
+          if (container.State == wslc_api::WslcContainerStateRunning)
             ++runtime.running;
       } else if (!runtime.error) {
-        runtime.error = std::format("Failed to list WSL containers in session {}: {}", sessions[i].SessionId, HResultString(hr));
+        runtime.error = std::format("Failed to list WSL containers in session {}: {}", sessionEntry.SessionId, HResultString(result));
       }
 
       CoTaskMemFree(containers);
@@ -843,8 +1041,8 @@ namespace {
       if (runtime.error && !IsAbsentRuntimeError(*runtime.error))
         diagnostics.push_back(std::format("{}: {}", runtime.displayName, *runtime.error));
 
-    if (diagnostics.empty() && !std::ranges::any_of(data.runtimes, [](const RuntimeInfo& runtime) { return runtime.available; }))
-      diagnostics.push_back("No selected container backend is available through a supported local API");
+    if (diagnostics.empty() && !std::ranges::any_of(data.runtimes, [](const RuntimeInfo& runtime) -> bool { return runtime.available; }))
+      diagnostics.emplace_back("No selected container backend is available through a supported local API");
 
     return diagnostics;
   }
@@ -860,7 +1058,7 @@ namespace {
   }
 
   auto CollectAllRuntimes(const ContainerInfoConfig& config) -> ContainerInfoData {
-    static CurlGlobal curlGlobal;
+    static const CurlGlobal CURL_GLOBAL;
 
     ContainerInfoData data;
     if (BackendEnabled(config, "docker"))
@@ -943,9 +1141,9 @@ namespace {
 
     auto collectData(PluginCache& cache) -> Result<Unit> override {
       (void)cache;
-      m_data = CollectAllRuntimes(m_config);
-      Vec<String> diagnostics = RuntimeDiagnostics(m_data);
-      m_lastError = None;
+      m_data                        = CollectAllRuntimes(m_config);
+      const Vec<String> diagnostics = RuntimeDiagnostics(m_data);
+      m_lastError                   = None;
       if (!diagnostics.empty())
         m_lastError = JoinDiagnostics(diagnostics);
       return {};
@@ -954,14 +1152,17 @@ namespace {
     [[nodiscard]] auto getFields() const -> PluginFields override {
       PluginFieldArray runtimes;
       runtimes.reserve(m_data.runtimes.size());
-      for (const RuntimeInfo& runtime : m_data.runtimes)
+      for (const RuntimeInfo& runtime : m_data.runtimes) {
+        if (!runtime.available && !runtime.configured)
+          continue;
         runtimes.emplace_back(RuntimeFields(runtime));
+      }
 
       return {
-        { "active", m_data.active },
-        { "total_running", m_data.totalRunning },
+        {           "active",          m_data.active },
+        {    "total_running",    m_data.totalRunning },
         { "total_containers", m_data.totalContainers },
-        { "runtimes", std::move(runtimes) },
+        {         "runtimes",    std::move(runtimes) },
       };
     }
 
@@ -990,15 +1191,15 @@ namespace {
     }
 
    private:
-    PluginMetadata    m_metadata;
+    PluginMetadata      m_metadata;
     ContainerInfoConfig m_config;
-    ContainerInfoData m_data;
-    Option<String>    m_lastError;
-    Option<String>    m_runtimeConfig;
-    bool              m_ready = false;
+    ContainerInfoData   m_data;
+    Option<String>      m_lastError;
+    Option<String>      m_runtimeConfig;
+    bool                m_ready = false;
   };
 
-#if defined(CONTAINER_INFO_ENABLE_TESTS)
+#ifdef CONTAINER_INFO_ENABLE_TESTS
   auto RunContainerInfoSelfTests() -> void {
     {
       const auto [running, total] = *ParseDockerContainers(R"json([{"State":"running"},{"State":"exited","Status":"Exited (0)"},{"Status":"Up 2 minutes"}])json");
