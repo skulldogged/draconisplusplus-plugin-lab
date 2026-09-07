@@ -549,6 +549,87 @@ namespace {
     return out;
   }
 
+  auto ParseHttpChunkSize(StringView sizeText) -> Result<usize> {
+    if (const usize extension = sizeText.find(';'); extension != StringView::npos)
+      sizeText = sizeText.substr(0, extension);
+    while (!sizeText.empty() && std::isspace(static_cast<unsigned char>(sizeText.front())))
+      sizeText.remove_prefix(1);
+    while (!sizeText.empty() && std::isspace(static_cast<unsigned char>(sizeText.back())))
+      sizeText.remove_suffix(1);
+    if (sizeText.empty())
+      ERR(ParseError, "Chunked HTTP response contained an empty chunk size");
+    usize       chunkSize   = 0;
+    const char* sizeEnd     = sizeText.data() + sizeText.size();
+    const auto [ptr, error] = std::from_chars(sizeText.data(), sizeEnd, chunkSize, 16);
+    if (error != std::errc {} || ptr != sizeEnd)
+      ERR(ParseError, "Chunked HTTP response contained an invalid chunk size");
+    return chunkSize;
+  }
+
+  // Offsets refer to an append-only body buffer. Each framing byte is scanned
+  // once, including partial size/trailer lines; payload bytes are only skipped.
+  // The full body is decoded once after framing completes.
+  class ChunkedHttpFraming {
+    enum class State { Size,
+                       Data,
+                       DataEnd,
+                       Trailers,
+                       Complete };
+    State m_state      = State::Size;
+    usize m_pos        = 0;
+    usize m_lineSearch = 0;
+    usize m_remaining  = 0;
+
+   public:
+    auto update(StringView body) -> Result<bool> {
+      for (;;) {
+        if (m_state == State::Complete) {
+          if (m_pos != body.size())
+            ERR(ParseError, "Unexpected bytes after chunked HTTP response");
+          return true;
+        }
+        if (m_state == State::Data) {
+          const usize available = std::min(m_remaining, body.size() - m_pos);
+          m_pos += available;
+          m_remaining -= available;
+          if (m_remaining != 0)
+            return false;
+          m_state = State::DataEnd;
+        }
+        if (m_state == State::DataEnd) {
+          if (body.size() - m_pos < 2)
+            return false;
+          if (body.substr(m_pos, 2) != "\r\n")
+            ERR(ParseError, "Chunked HTTP response chunk was not CRLF terminated");
+          m_pos += 2;
+          m_lineSearch = m_pos;
+          m_state      = State::Size;
+        }
+        const usize lineEnd = body.find("\r\n", m_lineSearch);
+        if (lineEnd == StringView::npos) {
+          // Retain a possible CR at the split between two reads.
+          m_lineSearch = body.empty() ? 0 : std::max(m_pos, body.size() - 1);
+          return false;
+        }
+        const StringView line = body.substr(m_pos, lineEnd - m_pos);
+        m_pos                 = lineEnd + 2;
+        m_lineSearch          = m_pos;
+        if (m_state == State::Trailers) {
+          if (line.empty())
+            m_state = State::Complete;
+          else if (!line.contains(':'))
+            ERR(ParseError, "Invalid HTTP trailer");
+        } else {
+          const auto size = ParseHttpChunkSize(line);
+          if (!size)
+            return std::unexpected(size.error());
+          m_remaining = *size;
+          m_state     = m_remaining == 0 ? State::Trailers : State::Data;
+        }
+      }
+    }
+  };
+
   auto DecodeChunkedHttpBody(StringView body) -> Result<String> {
     String decoded;
     usize  pos = 0;
@@ -558,21 +639,10 @@ namespace {
       if (lineEnd == StringView::npos)
         ERR(ParseError, "Chunked HTTP response ended before chunk size");
 
-      StringView sizeText = body.substr(pos, lineEnd - pos);
-      if (const usize extension = sizeText.find(';'); extension != StringView::npos)
-        sizeText = sizeText.substr(0, extension);
-      while (!sizeText.empty() && std::isspace(static_cast<unsigned char>(sizeText.front())))
-        sizeText.remove_prefix(1);
-      while (!sizeText.empty() && std::isspace(static_cast<unsigned char>(sizeText.back())))
-        sizeText.remove_suffix(1);
-      if (sizeText.empty())
-        ERR(ParseError, "Chunked HTTP response contained an empty chunk size");
-
-      usize       chunkSize = 0;
-      const char* sizeEnd   = sizeText.data() + sizeText.size();                        // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic): from_chars requires a pointer pair.
-      const auto [ptr, ec]  = std::from_chars(sizeText.data(), sizeEnd, chunkSize, 16); // NOLINT(bugprone-suspicious-stringview-data-usage): from_chars consumes the explicit bounded range.
-      if (ec != std::errc {} || ptr != sizeEnd)
-        ERR(ParseError, "Chunked HTTP response contained an invalid chunk size");
+      const auto size = ParseHttpChunkSize(body.substr(pos, lineEnd - pos));
+      if (!size)
+        return std::unexpected(size.error());
+      const usize chunkSize = *size;
 
       pos = lineEnd + 2;
       if (chunkSize == 0) {
@@ -718,6 +788,7 @@ namespace {
     Option<usize>          contentLength;
     Option<usize>          bodyStart;
     bool                   chunked = false;
+    ChunkedHttpFraming     framing;
     for (;;) {
       const auto readResult = transfer(buffer.data(), static_cast<DWORD>(buffer.size()), false);
       if (!readResult)
@@ -770,8 +841,13 @@ namespace {
           ERR(ParseError, "HTTP response exceeds content length");
         break;
       }
-      if (chunked && DecodeChunkedHttpBody(StringView(raw).substr(*bodyStart)))
-        break;
+      if (chunked) {
+        const auto complete = framing.update(StringView(raw).substr(*bodyStart));
+        if (!complete)
+          return std::unexpected(complete.error());
+        if (*complete)
+          break;
+      }
     }
     if (contentLength && raw.size() != *bodyStart + *contentLength)
       ERR(ParseError, "Truncated HTTP response body");
