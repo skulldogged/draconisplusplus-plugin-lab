@@ -105,7 +105,8 @@ namespace {
       is | "fortinet"      = StringView { "Fortinet VPN" },
       is | "pulse"         = StringView { "Pulse Secure" },
       is | "wireguard"     = StringView { "WireGuard" },
-      is | "tun/tap"       = StringView { "OpenVPN" },
+      is | "openvpn"       = StringView { "OpenVPN" },
+      is | "tun/tap"       = StringView { "VPN Tunnel" },
       is | "utun"          = StringView { "VPN Tunnel" },
       is | "tunnel"        = StringView { "VPN Tunnel" },
       is | "ppp"           = StringView { "PPP" },
@@ -147,7 +148,7 @@ namespace {
     static constexpr std::array<StringView, 1> PULSE_NEEDLES { "pulse" };
     static constexpr std::array<StringView, 1> WIREGUARD_NEEDLES { "wireguard" };
     static constexpr std::array<StringView, 1> WIREGUARD_PREFIXES { "wg" };
-    static constexpr std::array<StringView, 3> OPENVPN_NEEDLES { "openvpn", "tun", "tap" };
+    static constexpr std::array<StringView, 1> OPENVPN_NEEDLES { "openvpn" };
     static constexpr std::array<StringView, 2> OPENVPN_PREFIXES { "tun", "tap" };
     static constexpr std::array<StringView, 1> UTUN_NEEDLES { "utun" };
     static constexpr std::array<StringView, 1> UTUN_PREFIXES { "utun" };
@@ -155,7 +156,7 @@ namespace {
     static constexpr std::array<StringView, 1> PPP_PREFIXES { "ppp" };
     static constexpr std::array<StringView, 3> IPSEC_NEEDLES { "ipsec", "strongswan", "ikev2" };
 
-    static constexpr std::array<VpnRule, 18> RULES {
+    static constexpr std::array<VpnRule, 19> RULES {
       VpnRule {     .kind = "tailscale",     .needles = TAILSCALE_NEEDLES,        .prefixes = NO_PREFIXES },
       VpnRule {      .kind = "zerotier",      .needles = ZEROTIER_NEEDLES,  .prefixes = ZEROTIER_PREFIXES },
       VpnRule {       .kind = "mullvad",       .needles = MULLVAD_NEEDLES,        .prefixes = NO_PREFIXES },
@@ -170,8 +171,9 @@ namespace {
       VpnRule {      .kind = "fortinet",      .needles = FORTINET_NEEDLES,        .prefixes = NO_PREFIXES },
       VpnRule {         .kind = "pulse",         .needles = PULSE_NEEDLES,        .prefixes = NO_PREFIXES },
       VpnRule {     .kind = "wireguard",     .needles = WIREGUARD_NEEDLES, .prefixes = WIREGUARD_PREFIXES },
-      VpnRule {       .kind = "tun/tap",       .needles = OPENVPN_NEEDLES,   .prefixes = OPENVPN_PREFIXES },
+      VpnRule {       .kind = "openvpn",       .needles = OPENVPN_NEEDLES,        .prefixes = NO_PREFIXES },
       VpnRule {          .kind = "utun",          .needles = UTUN_NEEDLES,      .prefixes = UTUN_PREFIXES },
+      VpnRule {       .kind = "tun/tap",           .needles = NO_PREFIXES,   .prefixes = OPENVPN_PREFIXES },
       VpnRule {           .kind = "ppp",           .needles = PPP_NEEDLES,       .prefixes = PPP_PREFIXES },
       VpnRule {         .kind = "ipsec",         .needles = IPSEC_NEEDLES,        .prefixes = NO_PREFIXES },
     };
@@ -245,7 +247,7 @@ namespace {
 
       if (classification)
         interfaces.push_back({
-          .name        = !description.empty() ? description : name,
+          .name        = name,
           .kind        = classification->kind,
           .displayName = classification->displayName,
           .active      = active,
