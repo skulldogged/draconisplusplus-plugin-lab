@@ -467,33 +467,66 @@ namespace {
     return size * nmemb;
   }
 
-  auto HttpGetCurl(const HttpEndpoint& endpoint, StringView path) -> Result<HttpResponse> {
-    CURL* curl = curl_easy_init();
-    if (curl == nullptr)
-      ERR(ApiUnavailable, "curl_easy_init() failed");
+  // Owned by a provider, so concurrent clients do not share mutable CURL state.
+  class HttpSessions {
+    using Easy = std::unique_ptr<CURL, decltype(&curl_easy_cleanup)>;
+    std::mutex                      m_mutex;
+    Option<CurlGlobal>              m_global;
+    Map<Pair<String, String>, Easy> m_sessions;
 
-    String       body;
-    const String url = endpoint.urlBase + String(path);
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, CONNECT_TIMEOUT_MS);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, TOTAL_TIMEOUT_MS);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "draconisplusplus-container-info/1");
-    if (!endpoint.unixSocket.empty())
-      curl_easy_setopt(curl, CURLOPT_UNIX_SOCKET_PATH, endpoint.unixSocket.c_str());
+   public:
+    auto clear() -> void {
+      const std::lock_guard lock(m_mutex);
+      m_sessions.clear();
+      m_global.reset();
+    }
 
-    const CURLcode code = curl_easy_perform(curl);
-    long           http = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
-    curl_easy_cleanup(curl);
+    auto get(const HttpEndpoint& endpoint, StringView path) -> Result<HttpResponse> {
+      const std::lock_guard lock(m_mutex);
+      if (!m_global)
+        m_global.emplace();
+      const Pair<String, String> identity { endpoint.urlBase, endpoint.unixSocket };
+      auto                       entry = m_sessions.find(identity);
+      if (entry == m_sessions.end()) {
+        Easy easy(curl_easy_init(), curl_easy_cleanup);
+        if (!easy)
+          ERR(ApiUnavailable, "curl_easy_init() failed");
+        // Bound retained state if discovered/configured endpoints change over time.
+        if (m_sessions.size() >= 32)
+          m_sessions.clear();
+        entry = m_sessions.emplace(identity, std::move(easy)).first;
+      }
+      CURL*        curl = entry->second.get();
+      String       body;
+      const String url = endpoint.urlBase + String(path);
+      curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteCallback);
+      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+      curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, CONNECT_TIMEOUT_MS);
+      curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, TOTAL_TIMEOUT_MS);
+      curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+      curl_easy_setopt(curl, CURLOPT_USERAGENT, "draconisplusplus-container-info/1");
+      if (!endpoint.unixSocket.empty())
+        curl_easy_setopt(curl, CURLOPT_UNIX_SOCKET_PATH, endpoint.unixSocket.c_str());
 
-    if (code != CURLE_OK)
-      ERR_FMT(ApiUnavailable, "{}: {}", endpoint.display, curl_easy_strerror(code));
-    if (http >= 400)
-      ERR_FMT(ApiUnavailable, "{} returned HTTP {}", endpoint.display, http);
-    return HttpResponse { .status = http, .body = std::move(body) };
+      const CURLcode code = curl_easy_perform(curl);
+      long           http = 0;
+      curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
+      curl_easy_reset(curl); // Clear request pointers while retaining connections and DNS state.
+
+      if (code != CURLE_OK)
+        ERR_FMT(ApiUnavailable, "{}: {}", endpoint.display, curl_easy_strerror(code));
+      if (http >= 400)
+        ERR_FMT(ApiUnavailable, "{} returned HTTP {}", endpoint.display, http);
+      return HttpResponse { .status = http, .body = std::move(body) };
+    }
+  };
+
+  auto HttpGetCurl(const HttpEndpoint& endpoint, StringView path, HttpSessions* retained = nullptr) -> Result<HttpResponse> {
+    if (retained)
+      return retained->get(endpoint, path);
+    HttpSessions temporary;
+    return temporary.get(endpoint, path);
   }
 
 #ifdef _WIN32
@@ -542,8 +575,21 @@ namespace {
         ERR(ParseError, "Chunked HTTP response contained an invalid chunk size");
 
       pos = lineEnd + 2;
-      if (chunkSize == 0)
-        return decoded;
+      if (chunkSize == 0) {
+        for (;;) {
+          const usize trailerEnd = body.find("\r\n", pos);
+          if (trailerEnd == StringView::npos)
+            ERR(ParseError, "Chunked HTTP response ended before trailer termination");
+          if (trailerEnd == pos) {
+            if (trailerEnd + 2 != body.size())
+              ERR(ParseError, "Unexpected bytes after chunked HTTP response");
+            return decoded;
+          }
+          if (body.substr(pos, trailerEnd - pos).find(':') == StringView::npos)
+            ERR(ParseError, "Invalid HTTP trailer");
+          pos = trailerEnd + 2;
+        }
+      }
       if (body.size() - pos < chunkSize)
         ERR(ParseError, "Chunked HTTP response ended before chunk data");
 
@@ -563,13 +609,14 @@ namespace {
     const StringView headers    = StringView(raw).substr(0, headerEnd);
     const StringView statusLine = headers.substr(0, headers.find("\r\n"));
     long             status     = 0;
-    if (statusLine.size() >= 12) {
-      const StringView statusCode = statusLine.substr(9, 3);
-      const char*      statusEnd  = statusCode.data() + statusCode.size(); // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic): from_chars requires a pointer pair.
-      std::from_chars(statusCode.data(), statusEnd, status);               // NOLINT(bugprone-suspicious-stringview-data-usage): from_chars consumes the explicit bounded range.
-    }
+    if (statusLine.size() < 12 || !(statusLine.starts_with("HTTP/1.1 ") || statusLine.starts_with("HTTP/1.0 ")) || (statusLine.size() > 12 && statusLine[12] != ' '))
+      ERR(ParseError, "Invalid HTTP status line");
+    const StringView statusCode = statusLine.substr(9, 3);
+    const auto       parsed     = std::from_chars(statusCode.data(), statusCode.data() + statusCode.size(), status);
+    if (parsed.ec != std::errc {} || parsed.ptr != statusCode.data() + statusCode.size() || status < 100 || status > 599)
+      ERR(ParseError, "Invalid HTTP status code");
 
-    if (status >= 400)
+    if (status < 200 || status >= 300)
       ERR_FMT(ApiUnavailable, "{} returned HTTP {}", display, status);
 
     String       body         = raw.substr(headerEnd + 4);
@@ -595,30 +642,139 @@ namespace {
     return request;
   }
 
+  struct PipeHandle {
+    HANDLE value = INVALID_HANDLE_VALUE;
+    ~PipeHandle() {
+      if (value && value != INVALID_HANDLE_VALUE)
+        CloseHandle(value);
+    }
+  };
+
+  // One deadline covers the write and every read, including a connected server
+  // that never sends data. Cancellation is drained before stack buffers expire.
   auto HttpGetNamedPipe(const HttpEndpoint& endpoint, StringView path) -> Result<HttpResponse> {
-    const std::wstring pipe   = WideFromUtf8(endpoint.namedPipe);
-    HANDLE             handle = CreateFileW(pipe.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (handle == INVALID_HANDLE_VALUE)
-      ERR_FMT(ApiUnavailable, "{} pipe unavailable: {}", endpoint.display, static_cast<unsigned long>(GetLastError()));
+    constexpr usize     maxResponseBytes = 8 * 1024 * 1024;
+    constexpr usize     maxHeaderBytes   = 64 * 1024;
+    constexpr ULONGLONG timeoutMs        = 3000;
+    const ULONGLONG     deadline         = GetTickCount64() + timeoutMs;
+    const std::wstring  pipe             = WideFromUtf8(endpoint.namedPipe);
+    const PipeHandle    handle { CreateFileW(pipe.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr) };
+    if (handle.value == INVALID_HANDLE_VALUE)
+      ERR_FMT(ApiUnavailable, "{} pipe unavailable: {}", endpoint.display, GetLastError());
+    const PipeHandle event { CreateEventW(nullptr, TRUE, FALSE, nullptr) };
+    if (!event.value)
+      ERR_FMT(ApiUnavailable, "Cannot create pipe I/O event: {}", GetLastError());
 
-    DWORD mode = PIPE_READMODE_BYTE;
-    SetNamedPipeHandleState(handle, &mode, nullptr, nullptr);
+    auto transfer = [&](void* buffer, DWORD length, bool writing) -> Result<DWORD> {
+      if (GetTickCount64() >= deadline)
+        ERR(Timeout, "Container pipe request timed out");
+      ResetEvent(event.value);
+      OVERLAPPED operation {};
+      operation.hEvent       = event.value;
+      DWORD      transferred = 0;
+      const BOOL complete    = writing
+        ? WriteFile(handle.value, buffer, length, &transferred, &operation)
+        : ReadFile(handle.value, buffer, length, &transferred, &operation);
+      if (complete)
+        return transferred;
+      DWORD error = GetLastError();
+      if (!writing && error == ERROR_BROKEN_PIPE)
+        return DWORD { 0 };
+      if (error != ERROR_IO_PENDING)
+        ERR_FMT(IoError, "Container pipe I/O failed: {}", error);
+      const auto  now       = GetTickCount64();
+      const DWORD remaining = now < deadline ? static_cast<DWORD>(deadline - now) : 0;
+      const DWORD wait      = WaitForSingleObject(event.value, remaining);
+      if (wait != WAIT_OBJECT_0) {
+        CancelIoEx(handle.value, &operation);
+        GetOverlappedResult(handle.value, &operation, &transferred, TRUE);
+        if (wait == WAIT_TIMEOUT)
+          ERR(Timeout, "Container pipe request timed out");
+        ERR(IoError, "Container pipe wait failed");
+      }
+      if (!GetOverlappedResult(handle.value, &operation, &transferred, FALSE)) {
+        error = GetLastError();
+        if (!writing && error == ERROR_BROKEN_PIPE)
+          return DWORD { 0 };
+        ERR_FMT(IoError, "Container pipe completion failed: {}", error);
+      }
+      return transferred;
+    };
 
-    const String request = BuildHttpGetRequest(path);
-    DWORD        written = 0;
-    if (!WriteFile(handle, request.data(), static_cast<DWORD>(request.size()), &written, nullptr)) {
-      const DWORD err = GetLastError();
-      CloseHandle(handle);
-      ERR_FMT(IoError, "{} pipe write failed: {}", endpoint.display, static_cast<unsigned long>(err));
+    String request = BuildHttpGetRequest(path);
+    usize  sent    = 0;
+    while (sent < request.size()) {
+      const auto writeResult = transfer(request.data() + sent, static_cast<DWORD>(request.size() - sent), true);
+      if (!writeResult)
+        return std::unexpected(writeResult.error());
+      const DWORD written = *writeResult;
+      if (written == 0)
+        ERR(IoError, "Container pipe write made no progress");
+      sent += written;
     }
 
     String                 raw;
     std::array<char, 4096> buffer {};
-    DWORD                  read = 0;
-    while (ReadFile(handle, buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr) && read > 0)
-      raw.append(buffer.data(), read);
-    CloseHandle(handle);
-
+    Option<usize>          contentLength;
+    Option<usize>          bodyStart;
+    bool                   chunked = false;
+    for (;;) {
+      const auto readResult = transfer(buffer.data(), static_cast<DWORD>(buffer.size()), false);
+      if (!readResult)
+        return std::unexpected(readResult.error());
+      const DWORD count = *readResult;
+      if (count == 0)
+        break;
+      if (count > maxResponseBytes - raw.size())
+        ERR(ResourceExhausted, "Container HTTP response exceeds 8 MiB");
+      raw.append(buffer.data(), count);
+      if (!bodyStart) {
+        const usize end = raw.find("\r\n\r\n");
+        if ((end == String::npos && raw.size() > maxHeaderBytes) || (end != String::npos && end > maxHeaderBytes))
+          ERR(ResourceExhausted, "Container HTTP headers exceed 64 KiB");
+        if (end == String::npos)
+          continue;
+        bodyStart            = end + 4;
+        const String headers = ToLower(StringView(raw).substr(0, end));
+        usize        pos     = headers.find("\r\n");
+        while (pos != String::npos) {
+          pos += 2;
+          const usize      lineEnd = headers.find("\r\n", pos);
+          const StringView line    = StringView(headers).substr(pos, lineEnd == String::npos ? lineEnd : lineEnd - pos);
+          if (line.starts_with("content-length:")) {
+            if (contentLength)
+              ERR(ParseError, "Duplicate HTTP content length");
+            StringView value = line.substr(15);
+            while (!value.empty() && value.front() == ' ') value.remove_prefix(1);
+            usize      length = 0;
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), length);
+            if (parsed.ec != std::errc {} || parsed.ptr != value.data() + value.size() || length > maxResponseBytes - *bodyStart)
+              ERR(ParseError, "Invalid HTTP content length");
+            contentLength = length;
+          } else if (line.starts_with("transfer-encoding:")) {
+            if (chunked || line.substr(18).find_first_not_of(' ') == StringView::npos)
+              ERR(ParseError, "Invalid HTTP transfer encoding");
+            StringView value = line.substr(18);
+            while (!value.empty() && value.front() == ' ') value.remove_prefix(1);
+            if (value != "chunked")
+              ERR(ParseError, "Unsupported HTTP transfer encoding");
+            chunked = true;
+          }
+          pos = lineEnd;
+        }
+        if (contentLength && chunked)
+          ERR(ParseError, "Ambiguous HTTP response framing");
+      }
+      if (contentLength && raw.size() >= *bodyStart + *contentLength) {
+        if (raw.size() != *bodyStart + *contentLength)
+          ERR(ParseError, "HTTP response exceeds content length");
+        break;
+      }
+      if (chunked && DecodeChunkedHttpBody(StringView(raw).substr(*bodyStart)))
+        break;
+    }
+    if (contentLength && raw.size() != *bodyStart + *contentLength)
+      ERR(ParseError, "Truncated HTTP response body");
     return ParseRawHttpResponse(raw, endpoint.display);
   }
 
@@ -677,17 +833,20 @@ namespace {
   }
 #endif
 
-  auto HttpGet(const HttpEndpoint& endpoint, StringView path) -> Result<HttpResponse> {
+  auto HttpGet(const HttpEndpoint& endpoint, StringView path, HttpSessions* sessions = nullptr) -> Result<HttpResponse> {
 #ifdef _WIN32
     if (!endpoint.namedPipe.empty())
       return HttpGetNamedPipe(endpoint, path);
 #endif
-    return HttpGetCurl(endpoint, path);
+    return HttpGetCurl(endpoint, path, sessions);
   }
 
   auto EndpointLabel(const HttpEndpoint& endpoint) -> String {
-    if (!endpoint.unixSocket.empty())
-      return endpoint.unixSocket;
+    if (!endpoint.unixSocket.empty()) {
+      std::error_code error;
+      const auto      canonical = fs::weakly_canonical(endpoint.unixSocket, error);
+      return error ? endpoint.unixSocket : canonical.string();
+    }
     if (!endpoint.namedPipe.empty())
       return endpoint.namedPipe;
     return endpoint.urlBase;
@@ -707,10 +866,9 @@ namespace {
 #ifdef _WIN32
     endpoints.push_back({ .id = "docker-npipe", .display = "Docker Engine", .urlBase = "http://localhost", .unixSocket = {}, .namedPipe = R"(\\.\pipe\docker_engine)" });
 #else
-    constexpr std::array<StringView, 7> paths {
+    constexpr std::array<StringView, 6> paths {
       "/var/run/docker.sock",
       "/run/docker.sock",
-      "/run/user/1000/docker.sock",
       "/var/run/docker-desktop/docker.sock",
       "/run/docker-desktop/docker.sock",
       "/var/run/colima/docker.sock",
@@ -744,10 +902,9 @@ namespace {
     endpoints.push_back({ .id = "podman-npipe", .display = "Podman", .urlBase = "http://d", .unixSocket = {}, .namedPipe = R"(\\.\pipe\podman-machine-default)" });
     return endpoints;
 #else
-    constexpr std::array<StringView, 3> paths {
+    constexpr std::array<StringView, 2> paths {
       "/run/podman/podman.sock",
       "/var/run/podman/podman.sock",
-      "/var/run/docker.sock",
     };
     for (StringView path : paths)
       if (ExistingSocket(String(path)))
@@ -791,12 +948,11 @@ namespace {
       return Err(countsResult.error());
     Pair<u64, u64> counts = *countsResult;
 
-    if (Result<HttpResponse> versionResponse = getHttp(kind == RuntimeKind::Podman ? "/libpod/version" : "/version"); versionResponse) {
+    const auto versionResponse = getHttp(kind == RuntimeKind::Podman ? "/libpod/version" : "/version");
+    if (kind == RuntimeKind::Podman && !versionResponse)
+      ERR(NotSupported, "Endpoint does not expose the Podman API");
+    if (versionResponse)
       runtime.version = ParseDockerVersion(versionResponse->body);
-    } else if (kind == RuntimeKind::Podman) {
-      if (Result<HttpResponse> fallbackVersionResponse = getHttp("/version"); fallbackVersionResponse)
-        runtime.version = ParseDockerVersion(fallbackVersionResponse->body);
-    }
 
     const auto [running, total] = counts;
     runtime.available           = true;
@@ -807,15 +963,15 @@ namespace {
     return {};
   }
 
-  auto CollectDockerLikeEndpoint(RuntimeKind kind, RuntimeInfo& runtime, const HttpEndpoint& endpoint) -> Result<Unit> {
+  auto CollectDockerLikeEndpoint(RuntimeKind kind, RuntimeInfo& runtime, const HttpEndpoint& endpoint, HttpSessions* sessions = nullptr) -> Result<Unit> {
     runtime.endpoint = EndpointLabel(endpoint);
 
-    return CollectDockerLikeEndpointWith(kind, runtime, [&endpoint](StringView path) -> Result<HttpResponse> {
-      return HttpGet(endpoint, path);
+    return CollectDockerLikeEndpointWith(kind, runtime, [&endpoint, sessions](StringView path) -> Result<HttpResponse> {
+      return HttpGet(endpoint, path, sessions);
     });
   }
 
-  auto CollectDockerLike(RuntimeKind kind, StringView runtimeId, StringView display, Vec<HttpEndpoint> endpoints) -> RuntimeInfo {
+  auto CollectDockerLike(RuntimeKind kind, StringView runtimeId, StringView display, Vec<HttpEndpoint> endpoints, HttpSessions* sessions = nullptr) -> RuntimeInfo {
     RuntimeInfo runtime(String(runtimeId), String(display), kind == RuntimeKind::Docker ? "docker" : "podman");
 
     if (endpoints.empty()) {
@@ -829,7 +985,7 @@ namespace {
 
     Vec<String> failures;
     for (const HttpEndpoint& endpoint : endpoints) {
-      Result<Unit> collected = CollectDockerLikeEndpoint(kind, runtime, endpoint);
+      Result<Unit> collected = CollectDockerLikeEndpoint(kind, runtime, endpoint, sessions);
       if (collected)
         return runtime;
       failures.push_back(collected.error().message);
@@ -839,7 +995,7 @@ namespace {
     return runtime;
   }
 
-  auto CollectLxd() -> RuntimeInfo {
+  auto CollectLxd(HttpSessions* sessions = nullptr) -> RuntimeInfo {
     RuntimeInfo runtime("lxd", "LXD", "lxd");
 
     const Vec<HttpEndpoint> endpoints = LxdEndpoints();
@@ -852,10 +1008,10 @@ namespace {
     for (const HttpEndpoint& endpoint : endpoints) {
       runtime.endpoint = endpoint.unixSocket;
 
-      if (Result<HttpResponse> versionResponse = HttpGet(endpoint, "/1.0"); versionResponse)
+      if (Result<HttpResponse> versionResponse = HttpGet(endpoint, "/1.0", sessions); versionResponse)
         runtime.version = ParseLxdVersion(versionResponse->body);
 
-      Result<HttpResponse> instancesResponse = HttpGet(endpoint, "/1.0/instances?recursion=1");
+      Result<HttpResponse> instancesResponse = HttpGet(endpoint, "/1.0/instances?recursion=1", sessions);
       if (!instancesResponse) {
         failures.push_back(instancesResponse.error().message);
         continue;
@@ -1057,20 +1213,29 @@ namespace {
     return joined;
   }
 
-  auto CollectAllRuntimes(const ContainerInfoConfig& config) -> ContainerInfoData {
-    static const CurlGlobal CURL_GLOBAL;
-
+  auto CollectAllRuntimes(const ContainerInfoConfig& config, HttpSessions* sessions = nullptr) -> ContainerInfoData {
     ContainerInfoData data;
     if (BackendEnabled(config, "docker"))
-      data.runtimes.push_back(CollectDockerLike(RuntimeKind::Docker, "docker", "Docker", DockerEndpoints()));
+      data.runtimes.push_back(CollectDockerLike(RuntimeKind::Docker, "docker", "Docker", DockerEndpoints(), sessions));
     if (BackendEnabled(config, "podman"))
-      data.runtimes.push_back(CollectDockerLike(RuntimeKind::Podman, "podman", "Podman", PodmanEndpoints()));
+      data.runtimes.push_back(CollectDockerLike(RuntimeKind::Podman, "podman", "Podman", PodmanEndpoints(), sessions));
     if (BackendEnabled(config, "wsl"))
       data.runtimes.push_back(CollectWslContainers());
     if (BackendEnabled(config, "lxd"))
-      data.runtimes.push_back(CollectLxd());
+      data.runtimes.push_back(CollectLxd(sessions));
 
-    for (const RuntimeInfo& runtime : data.runtimes) {
+    Vec<String> countedEndpoints;
+    for (RuntimeInfo& runtime : data.runtimes) {
+      if (runtime.available && !runtime.endpoint.empty()) {
+        if (std::ranges::find(countedEndpoints, runtime.endpoint) != countedEndpoints.end()) {
+          runtime.available = false;
+          runtime.active    = false;
+          runtime.running = runtime.total = 0;
+          runtime.error                   = "Endpoint already counted by another runtime";
+          continue;
+        }
+        countedEndpoints.push_back(runtime.endpoint);
+      }
       data.totalRunning += runtime.running;
       data.totalContainers += runtime.total;
     }
@@ -1079,6 +1244,8 @@ namespace {
   }
 
   class ContainerInfoPlugin final : public IInfoProviderPlugin {
+    HttpSessions m_http;
+
    public:
     ContainerInfoPlugin() {
       m_metadata = {
@@ -1125,6 +1292,7 @@ namespace {
 
     auto shutdown() -> Unit override {
       m_ready = false;
+      m_http.clear();
     }
 
     [[nodiscard]] auto isReady() const -> bool override {
@@ -1141,7 +1309,7 @@ namespace {
 
     auto collectData(PluginCache& cache) -> Result<Unit> override {
       (void)cache;
-      m_data                        = CollectAllRuntimes(m_config);
+      m_data                        = CollectAllRuntimes(m_config, &m_http);
       const Vec<String> diagnostics = RuntimeDiagnostics(m_data);
       m_lastError                   = None;
       if (!diagnostics.empty())
